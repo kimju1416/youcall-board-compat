@@ -156,7 +156,13 @@ cd android && ./gradlew.bat clean assembleRelease
 | `android/app/build.gradle` | `applicationId`에 `.compat` · `enableV1Signing = true` · v3/v4 서명 끔 |
 | `strings.xml` · `capacitor.config.json` | 앱 이름 「유콜 보드 (호환)」 |
 
-화면·기능 코드(`www/`)는 기본판과 **바이트 단위로 동일**합니다. 기본판이 갱신되면 `www/`만 가져와 다시 빌드하세요.
+화면·기능 코드(`www/`)는 기본판과 **내용이 동일**합니다(줄바꿈 표기만 CRLF/LF로 다름 — 두 APK에서 꺼낸 `app.js`를 `tr -d '\r'` 후 해시 대조해 확인). 기본판이 갱신되면 `www/`만 가져와 다시 빌드하세요.
+
+### Android 6.0 실측 결과
+
+API 23 에뮬레이터(WebView 44)에서 **설치·실행·권한 안내까지 정상 동작**을 확인했습니다.
+다만 그 화면은 레이아웃이 무너집니다 — `www/style.css`가 CSS 변수(Chrome 49+) 113곳, CSS Grid(57+) 5곳, flex `gap`(84+) 19곳을 쓰기 때문입니다.
+**WebView가 공장 출하 상태인 Android 6.0 기기에서는 앱 대신 브라우저로 유콜 주소를 여는 편이 낫습니다.** Android 7.0 이상은 해당 없습니다.
 
 ---
 
