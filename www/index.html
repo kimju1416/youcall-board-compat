@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="ko" data-theme="1">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700;900&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+<title>유콜 보드</title>
+</head>
+<body>
+<div id="app">
+
+  <header class="header">
+    <div style="display:flex;align-items:center;gap:10px">
+      <div class="logo">유<em>콜</em> 보드</div>
+      <div class="badge" id="sBadge"></div>
+    </div>
+    <div class="hright">
+      <div class="live" id="liveDot"></div>
+      <div class="chip">전자칠판</div>
+      <button class="gearbtn" id="openSoundBtn" title="소리 설정">🔊</button>
+      <button class="gearbtn" id="openCfgBtn" title="설정">⚙️</button>
+    </div>
+  </header>
+
+  <div class="s-main">
+    <div class="s-standby" id="sStandby">
+      <div class="notice" id="noticeBar">
+        <div class="nb">📢 긴급 공지</div>
+        <div class="nt" id="noticeText"></div>
+      </div>
+
+      <div class="board">
+        <div class="box clockbox">
+          <div class="date" id="sDate"></div>
+          <div class="time" id="sClock">--:--</div>
+          <div class="class" id="sClassName"></div>
+          <div class="status" id="statusChip">-</div>
+        </div>
+
+        <div class="box todaybox">
+          <div class="sec">오늘 시간표</div>
+          <div class="period-row" id="periodRow"><div class="today-empty">불러오는 중...</div></div>
+        </div>
+
+        <div class="box weekbox">
+          <div class="sec">이번주 시간표</div>
+          <div id="weekWrap"><div class="week-empty">불러오는 중...</div></div>
+        </div>
+
+        <div class="box agendabox">
+          <div class="sec">오늘의 일정</div>
+          <div id="agendaList"><div class="agenda-empty">예정된 일정이 없습니다</div></div>
+        </div>
+
+        <div class="box mealbox">
+          <div class="sec">오늘 급식</div>
+          <div id="mealList"><div class="meal-empty">불러오는 중...</div></div>
+        </div>
+
+        <div class="box notebox">
+          <div class="sec blue">📌 학급 메모</div>
+          <div class="nm" id="classMemoText"></div>
+        </div>
+      </div>
+
+      <div class="s-settings" id="sSettings">
+        <div class="tts-status" id="ttsStatus"></div>
+        <div class="spanel">
+          <div class="srow">
+            <span class="slbl">호출음</span>
+            <select class="ssel" id="soundSelect" onchange="YC.savePref()">
+              <option value="0">부드러운 차임</option>
+              <option value="1">딩동</option>
+              <option value="2">멜로디</option>
+              <option value="3">나무 노크</option>
+              <option value="4">물방울</option>
+              <option value="5">🔔 학교 종소리</option>
+              <option value="6">📞 전화벨</option>
+              <option value="7">🚨 긴 알람</option>
+            </select>
+          </div>
+          <div class="srow" style="margin-top:9px">
+            <span class="slbl">호출 횟수</span>
+            <select class="ssel" id="repeatSelect" onchange="YC.savePref()">
+              <option value="1">1회</option>
+              <option value="2" selected>2회</option>
+              <option value="3">3회</option>
+            </select>
+          </div>
+          <div class="vrow">
+            <span class="slbl">볼륨</span>
+            <input type="range" class="vsldr" id="volSlider" min="1" max="10" value="5"
+              oninput="document.getElementById('vval').textContent=this.value;YC.savePref()">
+            <span class="vval" id="vval">5</span>
+          </div>
+          <div class="vrow" style="margin-top:8px">
+            <button class="nm-btn tbtn2" style="width:100%;text-align:center"
+              onclick="YC.playSound(parseInt(document.getElementById('soundSelect').value),YC.getVol())">🔊 소리 테스트</button>
+          </div>
+          <div class="vrow" style="margin-top:8px">
+            <span class="slbl">음성 크기</span>
+            <input type="range" class="vsldr" id="ttsVolSlider" min="1" max="10" value="10"
+              oninput="document.getElementById('tvval').textContent=this.value;YC.savePref()">
+            <span class="vval" id="tvval">10</span>
+          </div>
+          <div class="vrow" style="margin-top:8px">
+            <button class="nm-btn tbtn2" style="width:100%;text-align:center" onclick="YC.ttsTest()">🗣️ 음성 테스트</button>
+          </div>
+          <div class="vrow" style="margin-top:8px">
+            <button class="nm-btn tbtn2" style="width:100%;text-align:center" id="closeSoundBtn">닫기</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="s-alert" id="sAlert">
+      <div class="s-alert-inner">
+        <div class="s-lbl">📣 호출</div>
+        <div class="s-num"    id="sNum"></div>
+        <div class="s-name"   id="sName"></div>
+        <div class="s-san">학생</div>
+        <div class="s-msg"    id="sMsg"     style="display:none"></div>
+        <div class="s-teacher" id="sTeacher" style="display:none"></div>
+        <div class="s-location" id="sLocation" style="display:none"></div>
+        <div class="s-countdown" id="sCountdown"></div>
+        <div class="s-bar-wrap"><div class="s-bar" id="sBar" style="width:100%"></div></div>
+        <div class="s-queue"  id="sQueue"   style="display:none"></div>
+      </div>
+    </div>
+  </div>
+
+  <footer class="app-footer">유콜 보드 · 원본 웹앱과 같은 데이터를 사용합니다</footer>
+
+</div>
+
+<!-- 최초 실행 / 설정 화면 -->
+<div class="cfg-modal" id="cfgModal">
+  <div class="cfg-box">
+    <div class="cfg-title">⚙️ 유콜 보드 설정</div>
+    <div class="cfg-sub">학교 유콜 웹앱의 URL과 이 화면이 속한 학년·반을 입력하세요.<br>웹앱 URL은 교무실 PC에서 쓰는 주소와 동일합니다(뒤에 ?role=teacher 없이).</div>
+
+    <div>
+      <div class="cfg-lbl">웹앱 URL</div>
+      <input class="cfg-input" id="cfgUrl" placeholder="https://script.google.com/macros/s/AKfycb.../exec">
+    </div>
+    <div class="cfg-row2">
+      <div>
+        <div class="cfg-lbl">학년</div>
+        <input class="cfg-input" id="cfgGrade" placeholder="3">
+      </div>
+      <div>
+        <div class="cfg-lbl">반</div>
+        <input class="cfg-input" id="cfgClass" placeholder="2">
+      </div>
+    </div>
+
+    <div style="margin-top:6px;padding-top:10px;border-top:1px solid var(--border)">
+      <div class="cfg-lbl" style="margin-bottom:8px">동작 방식</div>
+
+      <label class="mode-opt" for="modeStandby">
+        <input type="radio" name="ycmode" id="modeStandby" value="standby" checked>
+        <span>
+          <b>상시 화면형</b>
+          <em>시간표·급식을 항상 띄워둡니다. 전자칠판을 유콜 전용으로 쓸 때.</em>
+        </span>
+      </label>
+
+      <label class="mode-opt" for="modeTray">
+        <input type="radio" name="ycmode" id="modeTray" value="tray">
+        <span>
+          <b>상주형 (트레이)</b>
+          <em>평소엔 숨어 있다가 호출이 오면 자동으로 뜹니다. 전자칠판을 수업자료 등 다른 용도로도 쓸 때.</em>
+        </span>
+      </label>
+    </div>
+
+    <button class="cfg-save-btn" id="cfgSaveBtn">저장하고 시작하기</button>
+    <div class="cfg-status" id="cfgStatus"></div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script src="js/app.js"></script>
+</body>
+</html>

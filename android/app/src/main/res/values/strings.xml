@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">유콜 보드 (호환)</string>
+    <string name="title_activity_main">유콜 보드 (호환)</string>
+    <string name="package_name">com.kimju.youcallboard</string>
+    <string name="custom_url_scheme">com.kimju.youcallboard</string>
+</resources>

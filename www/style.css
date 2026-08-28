@@ -1,0 +1,219 @@
+/* 유콜 웹앱(index.html)의 학생(전자칠판) 화면 스타일을 그대로 이식.
+   테마 팔레트 5종·뉴모피즘 그림자 구조는 원본과 100% 동일 — 시각적 일관성 유지. */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --bg:       #f2ebe1;
+  --bg2:      #ebe3d8;
+  --sh-dark:  #d8d0c4;
+  --sh-light: #fffaf4;
+  --blue:     #88c4f0;
+  --blue-d:   #5aa8e0;
+  --yellow:     #ffd97d;
+  --yellow-d:   #e8b830;
+  --yellow-ink: #7a5010;
+  --text:     #5a4030;
+  --text2:    #a09080;
+  --border:   #e4dbd0;
+  --r:        16px;
+  --r-lg:     22px;
+  --sh-out: 4px 4px 10px var(--sh-dark), -4px -4px 10px var(--sh-light);
+  --sh-in:  inset 3px 3px 8px var(--sh-dark), inset -3px -3px 8px var(--sh-light);
+  --sh-sm:  3px 3px 7px var(--sh-dark), -3px -3px 7px var(--sh-light);
+}
+html[data-theme="2"] {
+  --bg:#eef4ec; --bg2:#e5ede1; --sh-dark:#d4ddd0; --sh-light:#fbfef9;
+  --blue:#86c99b; --blue-d:#57a374;
+  --yellow:#ffab84; --yellow-d:#e8834f; --yellow-ink:#7a3814;
+  --text:#3f4a3d; --text2:#8b9b86; --border:#dde7d8;
+}
+html[data-theme="3"] {
+  --bg:#f8eef1; --bg2:#f1e4e9; --sh-dark:#e0d3d8; --sh-light:#fffafc;
+  --blue:#e7a8bb; --blue-d:#c97d95;
+  --yellow:#f0c675; --yellow-d:#d6a144; --yellow-ink:#6b4712;
+  --text:#4a3540; --text2:#a4919b; --border:#ecdde3;
+}
+html[data-theme="4"] {
+  --bg:#eef1f6; --bg2:#e3e8f0; --sh-dark:#d5dae4; --sh-light:#fbfcff;
+  --blue:#7a93c4; --blue-d:#4f6ba0;
+  --yellow:#f0c268; --yellow-d:#d4a13c; --yellow-ink:#63430e;
+  --text:#2e3a52; --text2:#8994a8; --border:#dbe2ee;
+}
+html[data-theme="5"] {
+  --bg:#eaf4f3; --bg2:#dfece9; --sh-dark:#d0e0de; --sh-light:#f8fffe;
+  --blue:#6fc2c0; --blue-d:#419a98;
+  --yellow:#ffb59a; --yellow-d:#e8916f; --yellow-ink:#6b3115;
+  --text:#2e4544; --text2:#88a19e; --border:#d4e6e3;
+}
+
+html, body { width: 100%; height: 100%; overflow: hidden; background: var(--bg); }
+body { font-family: 'Noto Sans KR', 'Malgun Gothic', sans-serif; color: var(--text); }
+#app { width: 100vw; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+
+.header { background: var(--bg2); border-bottom: 1px solid var(--border); padding: 0 24px; height: 56px; display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; -webkit-app-region: drag; }
+.header .hright, .header select, .header button { -webkit-app-region: no-drag; }
+.logo { font-size: 22px; font-weight: 900; letter-spacing: -1px; }
+.logo em { font-style: normal; color: var(--yellow-d); }
+.hright { display: flex; align-items: center; gap: 10px; }
+.chip { font-size: 13px; font-weight: 700; padding: 5px 14px; border-radius: 20px; box-shadow: var(--sh-sm); background: var(--bg); color: var(--yellow-d); }
+.badge { font-size: 15px; font-weight: 700; background: var(--bg2); border-radius: 20px; padding: 5px 14px; box-shadow: var(--sh-sm); max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.live { width: 8px; height: 8px; border-radius: 50%; background: #6dbe9a; animation: blink 2s ease-in-out infinite; }
+.live.off { background: #d9847a; animation: none; }
+@keyframes blink { 0%,100% { opacity:1; } 50% { opacity:.3; } }
+.gearbtn { background: var(--bg); box-shadow: var(--sh-sm); border: none; border-radius: 12px; width: 34px; height: 34px; font-size: 15px; cursor: pointer; }
+
+.nm-btn { background: var(--bg); box-shadow: var(--sh-out); border-radius: var(--r); border: none; cursor: pointer; font-family: inherit; font-weight: 700; color: var(--text); transition: all .15s; }
+.nm-btn:active { box-shadow: var(--sh-in); transform: scale(.98); }
+.toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); background: rgba(50,35,25,.85); color: #fff; padding: 10px 22px; border-radius: 20px; font-size: 13px; font-weight: 500; opacity: 0; transition: opacity .3s; pointer-events: none; white-space: nowrap; z-index: 9998; }
+.toast.show { opacity: 1; }
+
+.s-main    { flex: 1; position: relative; overflow: hidden; display: flex; flex-direction: column; }
+/* inset 축약형은 구형 WebView(Chrome 87 미만)에서 무시된다 — 전자칠판 내장 브라우저가
+   출고 버전 그대로인 경우가 많아 개별 속성으로 쓴다. (실기기 Chrome 83에서 재현 확인) */
+.s-standby { position: absolute; top: 0; right: 0; bottom: 0; left: 0; display: flex; flex-direction: column; overflow: hidden; }
+
+.notice { flex-shrink: 0; background: var(--yellow); padding: calc(10px * var(--nsc,1)) 24px; display: none; align-items: center; gap: 12px; }
+.notice.show { display: flex; }
+.notice .nb { font-size: calc(13px * var(--nsc,1)); font-weight: 900; color: var(--yellow-ink); background: rgba(255,255,255,.55); padding: 5px 14px; border-radius: 12px; flex-shrink: 0; }
+.notice .nt { font-size: calc(17px * var(--nsc,1)); font-weight: 700; color: var(--yellow-ink); white-space: normal; line-height: 1.3; overflow: hidden; }
+/* 예전에는 한 줄 고정(nowrap+…)이라 긴 공지의 뒷부분이 조용히 잘렸다. 이제는 길면 줄바꿈하고,
+   3줄을 넘거나 화면의 1/4을 넘으면 fitNoticeBar가 글자를 줄인다. */
+
+.board {
+  flex: 1; padding: 16px 24px; min-height: 0;
+  display: grid;
+  grid-template-columns: 230px 1.05fr 0.9fr 1.05fr;
+  grid-template-rows: auto 1fr;
+  grid-template-areas:
+    "clock today  today week"
+    "agenda meal  note  week";
+  gap: 14px;
+}
+.box { background: var(--bg); box-shadow: var(--sh-out); border-radius: var(--r-lg); padding: 16px 18px; min-height: 0; display: flex; flex-direction: column; }
+
+.clockbox { grid-area: clock; align-items: center; justify-content: center; gap: 12px; text-align: center; }
+.clockbox .date { font-size: 15px; font-weight: 700; color: var(--text2); }
+.clockbox .time { font-size: 52px; font-weight: 900; letter-spacing: -1px; }
+.clockbox .class { font-size: 17px; font-weight: 700; color: var(--blue-d); margin-top: 2px; }
+.clockbox .status { margin-top: 2px; font-size: 15px; font-weight: 900; color: var(--blue-d); background: var(--bg2); padding: 9px 20px; border-radius: 14px; }
+.clockbox .status.lunch { color: var(--yellow-ink); background: var(--yellow); }
+.clockbox .status.off   { color: var(--text2); background: var(--bg2); }
+
+.todaybox { grid-area: today; }
+.period-row { display: flex; gap: 8px; flex-wrap: wrap; align-content: stretch; flex: 1; }
+.period { flex: 1; min-width: 70px; background: var(--bg2); border-radius: var(--r); padding: 10px 6px; text-align: center; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; }
+.period.now { background: var(--blue); box-shadow: 2px 2px 8px var(--blue-d); }
+.period.lunch { background: var(--yellow); }
+.period.lunch.now { box-shadow: 2px 2px 8px var(--yellow-d); }
+.period .pn { font-size: 13px; font-weight: 700; color: var(--text2); }
+.period.now .pn { color: rgba(255,255,255,.85); }
+.period.lunch .pn { color: var(--yellow-ink); }
+.period .ps { font-size: 20px; font-weight: 900; }
+.period.now .ps { color: #fff; }
+.period.lunch .ps { color: var(--yellow-ink); font-size: 17px; }
+.today-empty { font-size: 13px; color: var(--text2); }
+
+.agendabox { grid-area: agenda; gap: 8px; overflow-y: auto; }
+.agenda-item { display: flex; align-items: center; gap: 10px; background: var(--bg2); border-radius: 12px; padding: 9px 12px; }
+.agenda-item .at { flex: 1; font-size: 14px; font-weight: 700; }
+.agenda-item .ad { font-size: 12px; font-weight: 900; color: var(--blue-d); background: var(--bg); padding: 3px 10px; border-radius: 10px; flex-shrink: 0; }
+.agenda-empty { font-size: 12px; color: var(--text2); }
+
+/* 급식 — 끼니(조/중/석)가 몇 개든 박스 안에서 스크롤 없이 다 보이게 한다.
+   --ms: 넘칠 때 JS(fitMealBox)가 단계적으로 낮추는 글자 배율. 전자칠판은 아무도 스크롤하지 않는다. */
+.mealbox { grid-area: meal; overflow: hidden; }
+#mealList { --ms: 1; flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 8px; overflow: hidden; }
+.meal-slot { min-height: 0; display: flex; flex-direction: column; }
+/* 끼니가 2개 이상이면 각 끼니를 연한 카드로 묶어 어디까지가 중식인지 한눈에 갈리게 한다 */
+/* 끼니가 2개 이상이면 좌우로 나란히 둔다 — 위아래로 쌓으면 폭이 남고 세로만 빡빡해진다.
+   박스가 좁아 한 칸이 200px도 안 되면 auto-fit이 알아서 다시 한 줄로 되돌린다. */
+#mealList.multi { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); align-content: start; gap: 10px; }
+#mealList.multi .meal-slot { background: var(--bg2); border-radius: var(--r); padding: calc(10px * var(--ms)) calc(12px * var(--ms)); }
+.meal-slot .mh { display: flex; align-items: center; gap: 8px; margin-bottom: calc(6px * var(--ms)); flex-shrink: 0; }
+.meal-slot .mt { font-size: calc(13px * var(--ms)); font-weight: 900; color: var(--yellow-ink); background: var(--yellow); padding: calc(4px * var(--ms)) calc(12px * var(--ms)); border-radius: 14px; white-space: nowrap; }
+.meal-slot.dinner .mt { color: #fff; background: var(--blue-d); }
+.meal-slot .mk { font-size: calc(12px * var(--ms)); font-weight: 700; color: var(--text2); white-space: nowrap; }
+.meal-slot .mm { font-size: calc(14px * var(--ms)); line-height: 1.6; color: var(--text); word-break: keep-all; }
+.meal-slot .ma { font-size: calc(11px * var(--ms)); color: var(--text2); margin-top: calc(4px * var(--ms)); }
+.meal-empty { font-size: 12px; color: var(--text2); }
+/* 배율을 최소까지 낮춰도 안 들어가는 저해상도 — 줄간격·여백까지 조인다 */
+#mealList.compact .meal-slot .mm { line-height: 1.35; }
+/* 최후의 수단: 배율을 최소까지 낮춰도 안 들어가면 알레르기 줄만 접는다(3끼니 저해상도) */
+#mealList.no-allergy .ma { display: none; }
+#mealList.compact.multi { gap: 6px; }
+#mealList.compact.multi .meal-slot { padding: calc(6px * var(--ms)) calc(10px * var(--ms)); }
+#mealList.compact .meal-slot .mh { margin-bottom: calc(3px * var(--ms)); }
+
+.notebox { grid-area: note; background: var(--bg2); box-shadow: var(--sh-in); }
+.notebox .nm { font-size: calc(15px * var(--msc,1)); line-height: 1.7; color: var(--text); flex: 1; white-space: pre-line; overflow-y: auto; }
+.notebox .nm.empty { color: var(--text2); font-size: 13px; }
+
+.weekbox { grid-area: week; }
+/* #weekWrap이 flex 컨테이너가 아니면 안쪽 table의 flex:1이 무시돼 표가 내용물 높이만큼만 차지하고
+   박스 아래에 빈 공간이 남는다 — 래퍼를 flex-column으로 만들어야 표가 실제로 늘어난다. */
+/* 우측 하단에 뜨는 소리 설정 패널(.s-settings, 실측 높이 약 235px)과 겹치지 않도록
+   표 아래에 그만큼 여백을 예약해둔다 — 값을 바꾸면 .s-settings 크기도 함께 확인할 것. */
+#weekWrap { flex: 1; display: flex; flex-direction: column; min-height: 0; padding-bottom: 250px; }
+/* --ws: 표가 우측 하단 소리 설정 패널에 가릴 때 JS(fitWeekBox)가 낮추는 배율.
+   저해상도에서 마지막 교시 행이 패널 밑으로 들어가던 문제. */
+table.week { --ws: 1; width: 100%; border-collapse: collapse; font-size: calc(clamp(12px,0.8vw,20px) * var(--ws)); flex: 1; }
+table.week th { font-weight: 700; color: var(--text2); padding: calc(7px * var(--ws)) 4px; font-size: calc(clamp(11px,0.72vw,18px) * var(--ws)); }
+table.week th.today { color: var(--blue-d); }
+table.week td { text-align: center; padding: calc(6px * var(--ws)) 4px; border-top: 1px solid var(--border); font-weight: 500; }
+table.week td.today-col { background: #eaf5ff; font-weight: 700; border-radius: 8px; }
+table.week td.pnum { color: var(--text2); font-size: calc(clamp(10px,0.67vw,16px) * var(--ws)); width: 32px; }
+.week-empty { font-size: clamp(11px,0.7vw,17px); color: var(--text2); }
+
+/* 소리 설정은 처음 한 번만 맞추면 되는 값이라 평소엔 숨긴다.
+   상시 노출하면 화면이 좁은 기기에서 주간 시간표를 가린다(실기기에서 확인). */
+.s-settings { position: absolute; bottom: 16px; right: 16px; display: none; z-index: 30; }
+.s-settings.show { display: block; }
+.tts-status { font-size: 11px; color: var(--text2); text-align: right; margin-bottom: 4px; min-height: 14px; }
+.spanel { background: var(--bg); border-radius: var(--r); box-shadow: var(--sh-out); padding: 12px 14px; width: 220px; }
+.srow { display: flex; align-items: center; gap: 8px; }
+.slbl { font-size: 11px; font-weight: 700; color: var(--text2); white-space: nowrap; }
+.ssel { flex: 1; background: var(--bg); border: none; box-shadow: var(--sh-in); border-radius: 10px; padding: 7px 9px; font-size: 11px; font-family: inherit; color: var(--text); outline: none; cursor: pointer; min-width: 0; }
+.vrow  { display: flex; align-items: center; gap: 8px; margin-top: 9px; }
+.vsldr { flex: 1; -webkit-appearance: none; height: 4px; background: var(--border); border-radius: 2px; outline: none; cursor: pointer; }
+.vsldr::-webkit-slider-thumb { -webkit-appearance: none; width: 18px; height: 18px; border-radius: 50%; background: var(--yellow-d); box-shadow: 2px 2px 5px rgba(0,0,0,.2); cursor: pointer; }
+.vval  { font-size: 11px; font-weight: 700; color: var(--yellow-d); min-width: 18px; text-align: right; }
+.tbtn2 { padding: 6px 10px; border-radius: 10px; font-size: 11px; font-weight: 700; color: var(--text2); white-space: nowrap; }
+
+.s-alert { position: absolute; top: 0; right: 0; bottom: 0; left: 0; display: none; flex-direction: column; align-items: center; justify-content: center; padding: 24px; z-index: 20; }
+.s-alert-inner { background: var(--bg); box-shadow: var(--sh-out); border-radius: var(--r-lg); border: 4px solid var(--yellow); padding: 40px 56px; display: flex; flex-direction: column; align-items: center; gap: 14px; text-align: center; min-width: 55vw; max-width: 90vw; animation: borderpulse 1.8s ease-in-out infinite; }
+@keyframes borderpulse { 0%,100% { border-color: var(--yellow); box-shadow: var(--sh-out); } 50% { border-color: var(--yellow-d); box-shadow: 0 0 60px rgba(255,217,125,.7), var(--sh-out); } }
+.s-lbl     { font-size: 15px; font-weight: 700; color: var(--yellow-ink); background: var(--yellow); padding: 7px 26px; border-radius: 20px; }
+.s-num     { font-size: 26px; font-weight: 700; color: var(--text2); }
+.s-name    { font-size: 96px; font-weight: 900; color: var(--text); line-height: 1; letter-spacing: -4px; }
+.s-san     { font-size: 44px; font-weight: 900; color: var(--text2); margin-top: -6px; }
+.s-msg     { font-size: 26px; font-weight: 700; color: var(--blue-d); background: var(--bg); padding: 11px 32px; border-radius: 16px; box-shadow: var(--sh-sm); }
+.s-teacher { font-size: 22px; font-weight: 700; color: var(--text2); background: var(--bg2); padding: 8px 28px; border-radius: 14px; box-shadow: var(--sh-sm); }
+.s-location { font-size: 19px; font-weight: 700; color: var(--yellow-ink); background: var(--yellow); padding: 8px 28px; border-radius: 14px; }
+.s-countdown { font-size: 16px; font-weight: 700; color: var(--text2); }
+.s-bar-wrap  { width: 100%; max-width: 380px; height: 8px; background: var(--border); border-radius: 4px; overflow: hidden; }
+.s-bar       { height: 100%; background: var(--yellow-d); border-radius: 4px; transition: width 1s linear; }
+.s-queue     { font-size: 12px; font-weight: 700; color: var(--yellow-ink); background: var(--yellow); padding: 5px 16px; border-radius: 20px; }
+
+/* 최초 설정 / 설정 화면 (웹앱엔 없던, exe 전용 화면) */
+.cfg-modal { position: fixed; top: 0; right: 0; bottom: 0; left: 0; background: rgba(242,235,225,.97); display: none; flex-direction: column; align-items: center; justify-content: center; gap: 18px; z-index: 9999; padding: 32px; overflow-y: auto; }
+.cfg-modal.show { display: flex; }
+.cfg-box { width: 100%; max-width: 440px; background: var(--bg); box-shadow: var(--sh-out); border-radius: var(--r-lg); padding: 28px 30px; display: flex; flex-direction: column; gap: 14px; }
+.cfg-title { font-size: 19px; font-weight: 900; text-align: center; margin-bottom: 4px; }
+.cfg-sub { font-size: 12px; color: var(--text2); text-align: center; margin-bottom: 6px; line-height: 1.6; }
+.cfg-lbl { font-size: 12px; font-weight: 700; color: var(--text2); margin-bottom: 4px; }
+.cfg-input { width: 100%; padding: 11px 14px; background: var(--bg); box-shadow: var(--sh-in); border: none; border-radius: var(--r); font-size: 13px; font-family: inherit; color: var(--text); outline: none; }
+.cfg-row2 { display: flex; gap: 10px; }
+.cfg-row2 > div { flex: 1; }
+.cfg-toggle-row { display: flex; align-items: center; justify-content: space-between; font-size: 13px; font-weight: 700; padding: 4px 0; }
+/* 동작 방식(상시 화면형 / 상주형) 선택 */
+.mode-opt { display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px; margin-bottom: 8px;
+  border-radius: var(--r); box-shadow: var(--sh-in); cursor: pointer; }
+.mode-opt input { margin-top: 3px; flex-shrink: 0; }
+.mode-opt b { display: block; font-size: 13px; font-weight: 800; margin-bottom: 3px; }
+.mode-opt em { display: block; font-style: normal; font-size: 11px; color: var(--text2); line-height: 1.5; }
+.cfg-save-btn { padding: 14px; background: var(--blue); color: #fff; border: none; border-radius: var(--r-lg); font-size: 15px; font-weight: 900; font-family: inherit; cursor: pointer; box-shadow: 4px 4px 12px var(--blue-d); margin-top: 6px; }
+.cfg-save-btn:active { transform: scale(.98); }
+.cfg-status { font-size: 12px; text-align: center; min-height: 16px; }
+.cfg-status.err { color: #c0392b; }
+.cfg-status.ok  { color: #2f8f5b; }
+
+.app-footer { background: var(--bg2); border-top: 1px solid var(--border); padding: 8px 24px 10px; text-align: center; flex-shrink: 0; font-size: 11px; color: var(--text2); }

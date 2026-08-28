@@ -1,0 +1,15 @@
+node_modules/
+android/build/
+android/app/build/
+android/.gradle/
+android/local.properties
+android/app/src/debug/
+www/js/*.map
+test-server.js
+live-proxy.js
+verify-shots/
+payload.json
+# 서명 키스토어는 절대 공개 저장소에 올리지 않는다 (분실 시 업데이트 배포 불가)
+*.keystore
+keystore.properties
+YouCallBoard.apk
