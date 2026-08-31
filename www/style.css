@@ -197,6 +197,10 @@ table.week td.pnum { color: var(--text2); font-size: calc(clamp(10px,0.67vw,16px
 .cfg-modal { position: fixed; top: 0; right: 0; bottom: 0; left: 0; background: rgba(242,235,225,.97); display: none; flex-direction: column; align-items: center; justify-content: center; gap: 18px; z-index: 9999; padding: 32px; overflow-y: auto; }
 .cfg-modal.show { display: flex; }
 .cfg-box { width: 100%; max-width: 440px; background: var(--bg); box-shadow: var(--sh-out); border-radius: var(--r-lg); padding: 28px 30px; display: flex; flex-direction: column; gap: 14px; }
+/* 소프트 키보드가 뜨면 화면 높이가 줄어드는데, 그때 상자 안 칸들이 서로 눌려 겹쳐 보였다
+   (전자칠판 실측 — '동작 방식' 라벨이 학년 칸 위로 올라탐). 줄이지 말고 넘치게 두고 스크롤시킨다.
+   화면이 넉넉할 때는 아무 영향이 없다. */
+.cfg-box > * { flex-shrink: 0; }
 .cfg-title { font-size: 19px; font-weight: 900; text-align: center; margin-bottom: 4px; }
 .cfg-sub { font-size: 12px; color: var(--text2); text-align: center; margin-bottom: 6px; line-height: 1.6; }
 .cfg-lbl { font-size: 12px; font-weight: 700; color: var(--text2); margin-bottom: 4px; }
