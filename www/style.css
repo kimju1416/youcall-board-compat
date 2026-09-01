@@ -155,13 +155,16 @@ body { font-family: 'Noto Sans KR', 'Malgun Gothic', sans-serif; color: var(--te
 #weekWrap { flex: 1; display: flex; flex-direction: column; min-height: 0; padding-bottom: 250px; }
 /* --ws: 표가 우측 하단 소리 설정 패널에 가릴 때 JS(fitWeekBox)가 낮추는 배율.
    저해상도에서 마지막 교시 행이 패널 밑으로 들어가던 문제. */
-table.week { --ws: 1; width: 100%; border-collapse: collapse; font-size: calc(clamp(12px,0.8vw,20px) * var(--ws)); flex: 1; }
-table.week th { font-weight: 700; color: var(--text2); padding: calc(7px * var(--ws)) 4px; font-size: calc(clamp(11px,0.72vw,18px) * var(--ws)); }
+/* 앞줄의 고정 px는 낡은 WebView(Chrome 79 미만)용 폴백이다 — clamp()를 모르면
+   그 선언 전체를 버리므로, 폴백이 없으면 글자 크기가 브라우저 기본값이 돼 표가 무너진다.
+   clamp를 아는 브라우저는 뒷줄이 이기므로 지금 화면은 그대로다. */
+table.week { --ws: 1; width: 100%; border-collapse: collapse; font-size: 15px; font-size: calc(clamp(12px,0.8vw,20px) * var(--ws)); flex: 1; }
+table.week th { font-weight: 700; color: var(--text2); padding: calc(7px * var(--ws)) 4px; font-size: 14px; font-size: calc(clamp(11px,0.72vw,18px) * var(--ws)); }
 table.week th.today { color: var(--blue-d); }
 table.week td { text-align: center; padding: calc(6px * var(--ws)) 4px; border-top: 1px solid var(--border); font-weight: 500; }
 table.week td.today-col { background: #eaf5ff; font-weight: 700; border-radius: 8px; }
-table.week td.pnum { color: var(--text2); font-size: calc(clamp(10px,0.67vw,16px) * var(--ws)); width: 32px; }
-.week-empty { font-size: clamp(11px,0.7vw,17px); color: var(--text2); }
+table.week td.pnum { color: var(--text2); font-size: 13px; font-size: calc(clamp(10px,0.67vw,16px) * var(--ws)); width: 32px; }
+.week-empty { font-size: 13px; font-size: clamp(11px,0.7vw,17px); color: var(--text2); }
 
 /* 소리 설정은 처음 한 번만 맞추면 되는 값이라 평소엔 숨긴다.
    상시 노출하면 화면이 좁은 기기에서 주간 시간표를 가린다(실기기에서 확인). */
@@ -201,6 +204,11 @@ table.week td.pnum { color: var(--text2); font-size: calc(clamp(10px,0.67vw,16px
    (전자칠판 실측 — '동작 방식' 라벨이 학년 칸 위로 올라탐). 줄이지 말고 넘치게 두고 스크롤시킨다.
    화면이 넉넉할 때는 아무 영향이 없다. */
 .cfg-box > * { flex-shrink: 0; }
+/* flex의 gap은 Chrome 84+다. 낡은 칠판 WebView에서는 간격이 0이 돼 칸이 다 붙어버리므로
+   JS(app.js)가 지원 여부를 실제로 재서 no-flex-gap을 붙이면 여백을 margin으로 되살린다.
+   gap을 아는 브라우저에는 이 규칙 자체가 적용되지 않는다. */
+.no-flex-gap .cfg-box > * + * { margin-top: 14px; }
+.no-flex-gap .cfg-row2 > div + div { margin-left: 10px; }
 .cfg-title { font-size: 19px; font-weight: 900; text-align: center; margin-bottom: 4px; }
 .cfg-sub { font-size: 12px; color: var(--text2); text-align: center; margin-bottom: 6px; line-height: 1.6; }
 .cfg-lbl { font-size: 12px; font-weight: 700; color: var(--text2); margin-bottom: 4px; }

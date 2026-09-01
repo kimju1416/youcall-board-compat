@@ -50,23 +50,40 @@ function buildUrl(base, params) {
   });
   return u.toString();
 }
+// 낡은 전자칠판 WebView 대응 — 실제 제보로 확인한 두 가지.
+//  · AbortController는 Chrome 66+, Promise.finally는 63+.
+//    둘 다 없는 칠판에서 "AbortController is not defined"로 저장이 통째로 실패했다.
+//  · 그래서 있으면 요청까지 끊고, 없으면 시간만 재서 실패로 돌린다(기능은 같다).
+//    .finally는 then/catch 두 갈래로 풀어 쓴다.
 function callApi(webAppUrl, api, params, timeoutMs) {
   if (!webAppUrl) return Promise.resolve({ ok: false, error: 'webAppUrl 미설정' });
-  var controller = new AbortController();
-  var timer = setTimeout(function () { controller.abort(); }, timeoutMs || 8000);
   var url;
   try {
     url = buildUrl(webAppUrl, Object.assign({ api: api }, params));
   } catch (e) {
-    clearTimeout(timer);
     return Promise.resolve({ ok: false, error: '주소 형식이 올바르지 않습니다 (https://script.google.com/... /exec 형태여야 합니다)' });
   }
-  return fetch(url, { signal: controller.signal }).then(function (res) {
+  var ms = timeoutMs || 8000;
+  var ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+  var opts = ctrl ? { signal: ctrl.signal } : {};
+  var timer = null;
+
+  var timeoutP = new Promise(function (resolve) {
+    timer = setTimeout(function () {
+      if (ctrl) { try { ctrl.abort(); } catch (e) {} }
+      resolve({ ok: false, error: '응답 시간 초과(' + Math.round(ms / 1000) + '초)' });
+    }, ms);
+  });
+  var fetchP = fetch(url, opts).then(function (res) {
     if (!res.ok) return { ok: false, error: 'HTTP ' + res.status };
     return res.json().then(function (data) { return { ok: true, data: data }; });
   }).catch(function (e) {
     return { ok: false, error: (e && e.message) || String(e) };
-  }).finally(function () { clearTimeout(timer); });
+  });
+  return Promise.race([fetchP, timeoutP]).then(
+    function (r) { clearTimeout(timer); return r; },
+    function (e) { clearTimeout(timer); return { ok: false, error: (e && e.message) || String(e) }; }
+  );
 }
 var api = {
   getCalls: function (u, g, c) { return callApi(u, 'calls', { grade: g, classNum: c }); },
@@ -698,8 +715,23 @@ function wireCfgModal() {
   });
 }
 
+// flex의 gap을 이 WebView가 정말 아는지 실제로 재 본다(Chrome 84+).
+// @supports로는 grid gap과 구분되지 않아 낡은 칠판을 놓친다.
+function markFlexGapSupport() {
+  try {
+    var d = document.createElement('div');
+    d.style.cssText = 'display:flex;flex-direction:column;row-gap:10px;position:absolute;visibility:hidden';
+    d.innerHTML = '<i style="display:block;height:10px"></i><i style="display:block;height:10px"></i>';
+    document.body.appendChild(d);
+    var ok = d.scrollHeight >= 30;
+    document.body.removeChild(d);
+    if (!ok) document.documentElement.className += ' no-flex-gap';
+  } catch (e) { /* 못 재면 그냥 둔다 — 지금 화면이 기준이다 */ }
+}
+
 /* ===== 초기화 ===== */
 window.addEventListener('DOMContentLoaded', function () {
+  markFlexGapSupport();
   wireCfgModal();
 
   SETTINGS = loadSettings();
