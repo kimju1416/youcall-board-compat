@@ -50,11 +50,15 @@ function buildUrl(base, params) {
   });
   return u.toString();
 }
-// 낡은 전자칠판 WebView 대응 — 실제 제보로 확인한 두 가지.
-//  · AbortController는 Chrome 66+, Promise.finally는 63+.
-//    둘 다 없는 칠판에서 "AbortController is not defined"로 저장이 통째로 실패했다.
-//  · 그래서 있으면 요청까지 끊고, 없으면 시간만 재서 실패로 돌린다(기능은 같다).
-//    .finally는 then/catch 두 갈래로 풀어 쓴다.
+// 낡은 전자칠판 WebView 대응 — 실제 제보로 확인한 세 가지.
+//  · AbortController는 Chrome 66+, Promise.finally는 63+. 둘 다 없는 칠판에서
+//    "AbortController is not defined"로 저장이 통째로 실패했다.
+//  · Capacitor가 fetch를 가로챌 때 `new Headers(options?.headers)`를 부르는데,
+//    headers를 안 넘기면 `new Headers(undefined)`가 되어 낡은 WebView가 거부한다
+//    ("Failed to construct 'Headers': No matching constructor signature" — 실제 제보).
+//    그래서 **항상 빈 헤더 객체를 넘긴다.** 최신 기기에는 아무 차이가 없다.
+//  · 그래도 가로채기가 깨지면 Capacitor가 원본을 보관해 둔 window.CapacitorWebFetch로
+//    직접 요청한다(네이티브 우회 없이. GAS는 CORS를 허용하므로 브라우저에서도 된다 — 실측).
 function callApi(webAppUrl, api, params, timeoutMs) {
   if (!webAppUrl) return Promise.resolve({ ok: false, error: 'webAppUrl 미설정' });
   var url;
@@ -65,7 +69,8 @@ function callApi(webAppUrl, api, params, timeoutMs) {
   }
   var ms = timeoutMs || 8000;
   var ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
-  var opts = ctrl ? { signal: ctrl.signal } : {};
+  var opts = { headers: {} };
+  if (ctrl) opts.signal = ctrl.signal;
   var timer = null;
 
   var timeoutP = new Promise(function (resolve) {
@@ -74,11 +79,24 @@ function callApi(webAppUrl, api, params, timeoutMs) {
       resolve({ ok: false, error: '응답 시간 초과(' + Math.round(ms / 1000) + '초)' });
     }, ms);
   });
-  var fetchP = fetch(url, opts).then(function (res) {
-    if (!res.ok) return { ok: false, error: 'HTTP ' + res.status };
-    return res.json().then(function (data) { return { ok: true, data: data }; });
-  }).catch(function (e) {
-    return { ok: false, error: (e && e.message) || String(e) };
+  function run(fetchFn) {
+    // Capacitor의 fetch 가로채기는 Headers를 **동기로** 만든다 — 거기서 터지면
+    // 예외가 .catch()를 건너뛰고 함수 밖으로 튀어 저장 핸들러째 죽는다(실측).
+    // Promise로 감싸 동기 예외도 반드시 rejection이 되게 한다.
+    return new Promise(function (resolve) { resolve(fetchFn(url, opts)); }).then(function (res) {
+      if (!res.ok) return { ok: false, error: 'HTTP ' + res.status };
+      return res.json().then(function (data) { return { ok: true, data: data }; });
+    });
+  }
+  var fetchP = run(window.fetch).catch(function (e) {
+    var msg = (e && e.message) || String(e);
+    var brokenBridge = /Headers|constructor|signature/i.test(msg);
+    if (brokenBridge && typeof window.CapacitorWebFetch === 'function') {
+      return run(window.CapacitorWebFetch).catch(function (e2) {
+        return { ok: false, error: (e2 && e2.message) || String(e2) };
+      });
+    }
+    return { ok: false, error: msg };
   });
   return Promise.race([fetchP, timeoutP]).then(
     function (r) { clearTimeout(timer); return r; },
