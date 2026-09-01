@@ -165,7 +165,7 @@ async function tick() {
   }
   var res = await api.getCalls(s.webAppUrl, s.grade, s.classNum);
   if (!res.ok) return;
-  var calls = res.data || [];
+  var calls = Array.isArray(res.data) ? res.data : [];
   if (!current) {
     var fresh = null;
     for (var i = 0; i < calls.length; i++) { if (!alertedRows[calls[i].row]) { fresh = calls[i]; break; } }
@@ -517,8 +517,11 @@ window.addEventListener('resize', function () {
   _fitTimer = setTimeout(refitAll, 200);
 });
 function renderPeriodRow(list) {
+  // 서버가 배열이 아닌 값을 주면 forEach에서 터져 화면 전체가 멈춘다(검사 중 실제로 겪음).
+  // 형태가 어긋나면 "수업 없음"으로 조용히 넘어가는 편이 낫다.
+  if (!Array.isArray(list)) list = [];
   _todaySubjects = {};
-  (list || []).forEach(function (x) { _todaySubjects[x.period] = x.subject; });
+  list.forEach(function (x) { _todaySubjects[x.period] = x.subject; });
   var row = document.getElementById('periodRow'); if (!row) return;
   if (!list || !list.length) { row.innerHTML = '<div class="today-empty">오늘은 수업이 없어요</div>'; return; }
   row.innerHTML = '';
