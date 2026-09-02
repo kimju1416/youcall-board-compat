@@ -58,6 +58,10 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- HDMI 입력 중에는 안드로이드 화면이 꺼진 것과 같아 시스템이 절전(Doze)에 들어간다.
+         그러면 포그라운드 서비스라도 네트워크가 끊겨 호출을 못 받고, 화면을 깨우는 순간
+         밀린 호출이 한꺼번에 뜬다(2026-09-02 제보 증상). 절전 제외를 요청할 수 있게 한다. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />

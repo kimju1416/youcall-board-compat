@@ -18,16 +18,38 @@ function loadSettings() {
   try { return Object.assign({}, DEFAULTS, JSON.parse(localStorage.getItem(STORE_KEY) || '{}')); }
   catch (e) { return Object.assign({}, DEFAULTS); }
 }
+// 상주 서비스(YouCallService)는 화면이 아니라 **네이티브 저장소**에서 설정을 읽는다.
+// 여기에 못 쓰면 서비스는 "설정 전"으로 보고 아무것도 안 한다 —
+// 앱을 열었을 때만 호출이 몰려서 뜨는 증상이 정확히 그것이다(2026-09-01 제보).
+// 예전에는 P.set()의 실패를 아무도 보지 않아 조용히 그 상태가 됐다. 이제 되읽어 확인한다.
+var _nativeSyncState = { ok: null, why: '' };
+function syncNativeSettings(json, cb) {
+  var P = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.Preferences;
+  if (!P) { _nativeSyncState = { ok: false, why: '네이티브 저장소를 찾지 못함' }; cb && cb(false); return; }
+  try {
+    Promise.resolve(P.set({ key: STORE_KEY, value: json }))
+      .then(function () { return P.get({ key: STORE_KEY }); })
+      .then(function (r) {
+        var ok = !!(r && typeof r.value === 'string' && r.value.length > 0);
+        _nativeSyncState = { ok: ok, why: ok ? '' : '저장한 값이 되읽히지 않음' };
+        cb && cb(ok);
+      })
+      .catch(function (e) {
+        _nativeSyncState = { ok: false, why: (e && e.message) || String(e) };
+        cb && cb(false);
+      });
+  } catch (e) {
+    _nativeSyncState = { ok: false, why: (e && e.message) || String(e) };
+    cb && cb(false);
+  }
+}
 function saveSettingsLocal(patch) {
   var next = Object.assign({}, loadSettings(), patch);
   var json = JSON.stringify(next);
   localStorage.setItem(STORE_KEY, json);
-  // 상주 서비스(YouCallService)가 같은 설정을 읽어야 하므로 네이티브 저장소에도 함께 쓴다.
-  // Capacitor Preferences는 SharedPreferences("CapacitorStorage")에 저장되고, 서비스가 그걸 읽는다.
-  try {
-    var P = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.Preferences;
-    if (P) P.set({ key: STORE_KEY, value: json });
-  } catch (e) { /* 웹에서 열었을 때는 무시 */ }
+  syncNativeSettings(json, function (ok) {
+    if (!ok) setTimeout(function () { syncNativeSettings(json); }, 3000);   // 한 번 더
+  });
   return next;
 }
 
@@ -736,6 +758,24 @@ function wireCfgModal() {
   });
 }
 
+// 네이티브 저장소에 끝내 못 썼을 때 — 화면 위쪽에 남긴다.
+// 이 표시가 보이면 "앱을 열었을 때만 호출이 뜨는" 상태라는 뜻이다.
+function showNativeSyncWarning() {
+  try {
+    if (document.getElementById('syncWarn')) return;
+    var head = document.querySelector('.hright');
+    if (!head) return;
+    var el = document.createElement('div');
+    el.id = 'syncWarn';
+    el.className = 'chip';
+    el.style.background = '#ffe0e0';
+    el.style.color = '#b03030';
+    el.textContent = '⚠ 뒤에서 호출 감시 안 됨';
+    el.title = '네이티브 저장소 동기화 실패: ' + (_nativeSyncState.why || '알 수 없음');
+    head.insertBefore(el, head.firstChild);
+  } catch (e) { }
+}
+
 // flex의 gap을 이 WebView가 정말 아는지 실제로 재 본다(Chrome 84+).
 // @supports로는 grid gap과 구분되지 않아 낡은 칠판을 놓친다.
 function markFlexGapSupport() {
@@ -759,6 +799,15 @@ window.addEventListener('DOMContentLoaded', function () {
   applyPrefsToUI(SETTINGS);
 
   if (!isConfigured()) { openCfgModal(); return; }
+
+  // 켤 때마다 네이티브 저장소를 다시 맞춘다 — 한 번 실패했더라도 여기서 복구된다.
+  // 끝내 안 되면 헤더에 표시한다(조용히 지나가면 "왜 호출이 안 오지"로만 남는다).
+  syncNativeSettings(JSON.stringify(SETTINGS), function (ok) {
+    if (ok) return;
+    setTimeout(function () {
+      syncNativeSettings(JSON.stringify(SETTINGS), function (ok2) { if (!ok2) showNativeSyncWarning(); });
+    }, 4000);
+  });
 
   document.getElementById('sBadge').textContent = SETTINGS.grade + '학년 ' + SETTINGS.classNum + '반';
   SCHEDULE = buildSchedule(PERIOD_CONFIG);

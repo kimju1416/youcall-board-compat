@@ -56,11 +56,25 @@ public class YouCallService extends Service {
     @Override
     public IBinder onBind(Intent intent) { return null; }
 
+    private android.os.PowerManager.WakeLock wakeLock;
+
     @Override
     public void onCreate() {
         super.onCreate();
         createChannels();
         startForeground(NOTI_ONGOING, buildOngoingNotification("호출 대기 중"));
+        // HDMI 입력 중에는 안드로이드 화면이 꺼진 것과 같아 시스템이 절전에 들어간다.
+        // 그러면 이 서비스의 폴링 타이머가 늦춰지고 네트워크도 막혀 호출을 놓친다
+        // (증상: 소리도 팝업도 없다가, 화면을 깨우면 밀린 호출이 한꺼번에 뜬다).
+        // CPU만 붙잡아 두는 부분 웨이크락으로 감시를 계속한다 — 화면은 켜지 않는다.
+        try {
+            android.os.PowerManager pm = (android.os.PowerManager) getSystemService(Context.POWER_SERVICE);
+            if (pm != null) {
+                wakeLock = pm.newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "youcall:poll");
+                wakeLock.setReferenceCounted(false);
+                wakeLock.acquire();
+            }
+        } catch (Exception e) { Log.w(TAG, "웨이크락 실패: " + e.getMessage()); }
         running = true;
         handler.post(pollTask);
     }
@@ -74,6 +88,7 @@ public class YouCallService extends Service {
     public void onDestroy() {
         running = false;
         handler.removeCallbacks(pollTask);
+        try { if (wakeLock != null && wakeLock.isHeld()) wakeLock.release(); } catch (Exception ignored) { }
         super.onDestroy();
     }
 
@@ -92,13 +107,17 @@ public class YouCallService extends Service {
         try {
             SharedPreferences sp = getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE);
             String raw = sp.getString(KEY_SETTINGS, null);
-            if (raw == null) return; // 아직 설정 전
+            // 이 서비스가 조용히 멈추는 자리는 전부 상주 알림에 글자로 남긴다.
+            // "소리도 팝업도 없이 무반응"이라는 제보를 상태바만 보고 가려내기 위한 것이다.
+            if (raw == null) { setOngoing("설정을 기다리는 중 — 앱을 열어 저장해 주세요"); return; }
 
             JSONObject cfg = new JSONObject(raw);
             String base = cfg.optString("webAppUrl", "");
             String grade = cfg.optString("grade", "");
             String classNum = cfg.optString("classNum", "");
-            if (base.isEmpty() || grade.isEmpty() || classNum.isEmpty()) return;
+            if (base.isEmpty() || grade.isEmpty() || classNum.isEmpty()) {
+                setOngoing("설정이 비어 있음 — 앱을 열어 주소·학년·반을 저장해 주세요"); return;
+            }
 
             String url = base
                 + (base.contains("?") ? "&" : "?")
@@ -107,7 +126,14 @@ public class YouCallService extends Service {
                 + "&classNum=" + URLEncoder.encode(classNum, "UTF-8");
 
             String body = httpGet(url);
-            if (body == null) return;
+            if (body == null) { setOngoing(grade + "학년 " + classNum + "반 · 서버 연결 실패 (주소 확인)"); return; }
+
+            // 상태바만 보고도 무엇이 막고 있는지 알 수 있어야 한다.
+            // 절전 제외가 안 되어 있으면 HDMI를 보는 동안 이 감시가 통째로 멈춘다 — 그게 더 큰 문제라 앞에 쓴다.
+            String warn = "";
+            if (!isBatteryExempt()) warn += " · ⚠ 절전 제외 필요";
+            if (!canOverlay()) warn += " · ⚠ 다른 앱 위에 표시 꺼짐";
+            setOngoing(grade + "학년 " + classNum + "반 감시 중" + warn);
 
             JSONArray calls = new JSONArray(body);
             if (calls.length() == 0) return;
@@ -128,7 +154,31 @@ public class YouCallService extends Service {
             }
         } catch (Exception e) {
             Log.w(TAG, "poll 실패: " + e.getMessage());
+            setOngoing("점검 필요: " + e.getClass().getSimpleName());
         }
+    }
+
+    private boolean canOverlay() {
+        return Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(this);
+    }
+
+    private boolean isBatteryExempt() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return true;
+        try {
+            android.os.PowerManager pm = (android.os.PowerManager) getSystemService(Context.POWER_SERVICE);
+            return pm == null || pm.isIgnoringBatteryOptimizations(getPackageName());
+        } catch (Exception e) { return true; }
+    }
+
+    /** 상주(트레이) 알림 문구를 지금 상태로 바꾼다. 같은 문구면 건드리지 않는다. */
+    private String lastOngoing = null;
+    private void setOngoing(String text) {
+        if (text == null || text.equals(lastOngoing)) return;
+        lastOngoing = text;
+        try {
+            NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+            nm.notify(NOTI_ONGOING, buildOngoingNotification(text));
+        } catch (Exception ignored) { }
     }
 
     private String httpGet(String urlStr) {
