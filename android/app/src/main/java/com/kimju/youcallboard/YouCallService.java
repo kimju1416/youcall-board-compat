@@ -59,6 +59,16 @@ public class YouCallService extends Service {
     private final Set<Integer> alertedRows = new HashSet<>();
     private static final String KEY_ALERTED = "yc_alerted_rows";
     private static final int ALERTED_KEEP = 200;   // 오래된 것부터 버린다. 무한히 쌓이지 않게.
+
+    /**
+     * 기록을 **행 번호로만** 들고 있으면 안 된다. 유콜 시트를 비우면 행 번호가 1부터 다시
+     * 시작하는데, 그때 앱이 "이미 알린 호출"로 착각해 **진짜 호출을 통째로 삼킨다.**
+     * 그래서 각 기록에 시각을 함께 남기고 하루가 지나면 버린다.
+     * 중복을 막아야 하는 구간(죽었다 살아나는 몇 분)에는 충분히 남아 있고,
+     * 다음 날이나 시트를 정리한 뒤에는 깨끗한 상태로 시작한다.
+     */
+    private static final long ALERTED_TTL_MS = 24L * 60 * 60 * 1000;
+    private final java.util.HashMap<Integer, Long> alertedAt = new java.util.HashMap<>();
     private boolean running = false;
 
     @Override
@@ -193,6 +203,7 @@ public class YouCallService extends Service {
                 if (row < 0 || alertedRows.contains(row)) continue;
 
                 alertedRows.add(row);
+                alertedAt.put(row, System.currentTimeMillis());
                 saveAlerted(sp);          // 죽었다 살아나도 같은 호출로 또 울리지 않도록 즉시 남긴다
                 String name = c.optString("name", "");
                 String num = c.optString("num", "");
@@ -211,27 +222,49 @@ public class YouCallService extends Service {
         return Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(this);
     }
 
-    /** 저장해 둔 "이미 알린 호출" 목록을 불러온다. 서비스가 살아날 때 한 번. */
+    /** 저장해 둔 "이미 알린 호출"을 불러온다(하루 지난 것은 버린다). 서비스가 살아날 때 한 번. */
     private void loadAlerted(SharedPreferences sp) {
         try {
             String s = sp.getString(KEY_ALERTED, null);
             if (s == null) return;
+            long now = System.currentTimeMillis();
             JSONArray a = new JSONArray(s);
-            for (int i = 0; i < a.length(); i++) alertedRows.add(a.getInt(i));
+            for (int i = 0; i < a.length(); i++) {
+                Object item = a.get(i);
+                if (item instanceof JSONArray) {                 // [행번호, 알린시각]
+                    JSONArray pair = (JSONArray) item;
+                    int row = pair.getInt(0);
+                    long ts = pair.getLong(1);
+                    if (now - ts > ALERTED_TTL_MS) continue;     // 오래된 기록은 되살리지 않는다
+                    alertedRows.add(row);
+                    alertedAt.put(row, ts);
+                }
+                // 옛 판이 남긴 «숫자만» 기록은 시각을 알 수 없다. 통째로 버린다 —
+                // 남겨 두면 시트를 비웠을 때 진짜 호출을 삼킬 수 있다.
+            }
         } catch (Exception ignored) { }
     }
 
     private void saveAlerted(SharedPreferences sp) {
         try {
+            long now = System.currentTimeMillis();
             java.util.List<Integer> list = new java.util.ArrayList<>(alertedRows);
             java.util.Collections.sort(list);                       // 행 번호는 커질수록 최신이다
             int from = Math.max(0, list.size() - ALERTED_KEEP);
             JSONArray a = new JSONArray();
-            for (int i = from; i < list.size(); i++) a.put(list.get(i));
-            if (from > 0) {                                          // 잘라낸 만큼 메모리에서도 비운다
-                alertedRows.clear();
-                for (int i = from; i < list.size(); i++) alertedRows.add(list.get(i));
+            java.util.HashMap<Integer, Long> kept = new java.util.HashMap<>();
+            for (int i = from; i < list.size(); i++) {
+                int row = list.get(i);
+                Long ts = alertedAt.get(row);
+                if (ts == null) ts = now;
+                if (now - ts > ALERTED_TTL_MS) continue;
+                JSONArray pair = new JSONArray();
+                pair.put(row).put(ts);
+                a.put(pair);
+                kept.put(row, ts);
             }
+            alertedRows.clear(); alertedRows.addAll(kept.keySet());  // 메모리도 같은 상태로 맞춘다
+            alertedAt.clear(); alertedAt.putAll(kept);
             sp.edit().putString(KEY_ALERTED, a.toString()).apply();
         } catch (Exception ignored) { }
     }
