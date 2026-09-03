@@ -50,7 +50,15 @@ public class YouCallService extends Service {
     private static final String KEY_SETTINGS = "yc_settings";
 
     private final Handler handler = new Handler(Looper.getMainLooper());
+    /**
+     * 이미 알린 호출들. **프로세스가 죽었다 살아나도 기억해야 한다.**
+     * 서버는 선생님이 확인하기 전까지 호출을 계속 들고 있는데, 화면을 못 띄우는 상황에서는
+     * 웹이 "확인"을 보내지 못한다. 그 상태에서 이 기록이 메모리에만 있으면 —
+     * 앱이 되살아날 때마다 같은 호출을 새 호출로 보고 다시 울린다(수업 중이면 재앙이다).
+     */
     private final Set<Integer> alertedRows = new HashSet<>();
+    private static final String KEY_ALERTED = "yc_alerted_rows";
+    private static final int ALERTED_KEEP = 200;   // 오래된 것부터 버린다. 무한히 쌓이지 않게.
     private boolean running = false;
 
     @Override
@@ -90,6 +98,9 @@ public class YouCallService extends Service {
             }
         } catch (Exception e) { Log.w(TAG, "와이파이락 실패: " + e.getMessage()); }
 
+        // 죽기 전에 이미 알린 호출들을 되살린다 — 부활 직후 같은 호출로 다시 울리지 않게.
+        try { loadAlerted(getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE)); } catch (Exception ignored) { }
+
         running = true;
         handler.post(pollTask);
     }
@@ -105,16 +116,26 @@ public class YouCallService extends Service {
         handler.removeCallbacks(pollTask);
         try { if (wakeLock != null && wakeLock.isHeld()) wakeLock.release(); } catch (Exception ignored) { }
         try { if (wifiLock != null && wifiLock.isHeld()) wifiLock.release(); } catch (Exception ignored) { }
+        // 볼륨을 올린 채 서비스가 죽으면 그 상태로 남는다 — 반드시 되돌리고 나간다.
+        try { handler.removeCallbacks(stopRingTask); stopRingTask.run(); } catch (Exception ignored) { }
         super.onDestroy();
     }
+
+    /** 응답이 느릴 때(타임아웃 8초 > 폴링 2초) 요청이 겹쳐 쌓이지 않도록 한 번에 하나만 돈다. */
+    private volatile boolean polling = false;
 
     private final Runnable pollTask = new Runnable() {
         @Override
         public void run() {
             if (!running) return;
-            new Thread(new Runnable() {
-                @Override public void run() { pollOnce(); }
-            }).start();
+            if (!polling) {
+                polling = true;
+                new Thread(new Runnable() {
+                    @Override public void run() {
+                        try { pollOnce(); } finally { polling = false; }
+                    }
+                }).start();
+            }
             handler.postDelayed(this, POLL_MS);
         }
     };
@@ -172,6 +193,7 @@ public class YouCallService extends Service {
                 if (row < 0 || alertedRows.contains(row)) continue;
 
                 alertedRows.add(row);
+                saveAlerted(sp);          // 죽었다 살아나도 같은 호출로 또 울리지 않도록 즉시 남긴다
                 String name = c.optString("name", "");
                 String num = c.optString("num", "");
                 String teacher = c.optString("teacher", "");
@@ -187,6 +209,31 @@ public class YouCallService extends Service {
 
     private boolean canOverlay() {
         return Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(this);
+    }
+
+    /** 저장해 둔 "이미 알린 호출" 목록을 불러온다. 서비스가 살아날 때 한 번. */
+    private void loadAlerted(SharedPreferences sp) {
+        try {
+            String s = sp.getString(KEY_ALERTED, null);
+            if (s == null) return;
+            JSONArray a = new JSONArray(s);
+            for (int i = 0; i < a.length(); i++) alertedRows.add(a.getInt(i));
+        } catch (Exception ignored) { }
+    }
+
+    private void saveAlerted(SharedPreferences sp) {
+        try {
+            java.util.List<Integer> list = new java.util.ArrayList<>(alertedRows);
+            java.util.Collections.sort(list);                       // 행 번호는 커질수록 최신이다
+            int from = Math.max(0, list.size() - ALERTED_KEEP);
+            JSONArray a = new JSONArray();
+            for (int i = from; i < list.size(); i++) a.put(list.get(i));
+            if (from > 0) {                                          // 잘라낸 만큼 메모리에서도 비운다
+                alertedRows.clear();
+                for (int i = from; i < list.size(); i++) alertedRows.add(list.get(i));
+            }
+            sp.edit().putString(KEY_ALERTED, a.toString()).apply();
+        } catch (Exception ignored) { }
     }
 
     private int sleepGuardTick = 0;
@@ -300,11 +347,17 @@ public class YouCallService extends Service {
     private int savedAlarmVol = -1;
     private void playAlarmOnce() {
         try {
+            // 호출이 잇따르면 이 메서드가 겹쳐 불린다. 앞의 소리를 먼저 정리하지 않으면
+            // 울리던 것이 멈추지 않은 채 새 것이 겹쳐 재생된다.
+            stopRing(ringAlarm); stopRing(ringNoti);
+            handler.removeCallbacks(stopRingTask);
+
             android.media.AudioManager am = (android.media.AudioManager) getSystemService(Context.AUDIO_SERVICE);
             if (am != null) {
                 int max = am.getStreamMaxVolume(android.media.AudioManager.STREAM_ALARM);
                 int cur = am.getStreamVolume(android.media.AudioManager.STREAM_ALARM);
-                if (cur < max * 0.5) {           // 너무 작으면 호출을 놓친다
+                // savedAlarmVol을 덮어쓰면 «원래 볼륨»을 영영 잃는다 — 아직 복구 전이면 건드리지 않는다.
+                if (cur < max * 0.5 && savedAlarmVol < 0) {
                     savedAlarmVol = cur;
                     am.setStreamVolume(android.media.AudioManager.STREAM_ALARM, (int) Math.ceil(max * 0.7), 0);
                 }
@@ -312,18 +365,7 @@ public class YouCallService extends Service {
             ringAlarm = playVia(android.media.RingtoneManager.TYPE_ALARM, android.media.AudioAttributes.USAGE_ALARM);
             ringNoti = playVia(android.media.RingtoneManager.TYPE_NOTIFICATION, android.media.AudioAttributes.USAGE_NOTIFICATION);
 
-            handler.postDelayed(new Runnable() {
-                @Override public void run() {
-                    stopRing(ringAlarm); stopRing(ringNoti);
-                    try {   // 볼륨을 건드렸으면 되돌린다
-                        android.media.AudioManager m = (android.media.AudioManager) getSystemService(Context.AUDIO_SERVICE);
-                        if (m != null && savedAlarmVol >= 0) {
-                            m.setStreamVolume(android.media.AudioManager.STREAM_ALARM, savedAlarmVol, 0);
-                            savedAlarmVol = -1;
-                        }
-                    } catch (Exception ignored) { }
-                }
-            }, 10_000L);
+            handler.postDelayed(stopRingTask, 10_000L);
         } catch (Exception e) { Log.w(TAG, "호출음 재생 실패: " + e.getMessage()); }
     }
 
@@ -343,6 +385,20 @@ public class YouCallService extends Service {
             return r;
         } catch (Exception e) { return null; }
     }
+
+    /** 소리를 멈추고 볼륨을 원래대로. 새 호출이 오면 취소하고 다시 건다. */
+    private final Runnable stopRingTask = new Runnable() {
+        @Override public void run() {
+            stopRing(ringAlarm); stopRing(ringNoti);
+            try {
+                android.media.AudioManager m = (android.media.AudioManager) getSystemService(Context.AUDIO_SERVICE);
+                if (m != null && savedAlarmVol >= 0) {
+                    m.setStreamVolume(android.media.AudioManager.STREAM_ALARM, savedAlarmVol, 0);
+                    savedAlarmVol = -1;
+                }
+            } catch (Exception ignored) { }
+        }
+    };
 
     private void stopRing(android.media.Ringtone r) {
         try { if (r != null && r.isPlaying()) r.stop(); } catch (Exception ignored) { }
