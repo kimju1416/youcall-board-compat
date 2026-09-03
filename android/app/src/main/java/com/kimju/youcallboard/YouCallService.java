@@ -158,6 +158,10 @@ public class YouCallService extends Service {
                 sp.edit().putString("yc_last_poll", String.valueOf(System.currentTimeMillis())).apply();
             } catch (Exception ignored) { }
 
+            // 화면 자동 꺼짐이 되돌려졌으면 다시 "사용 안 함"으로. (칠판 재부팅이나
+            // 다른 앱이 값을 바꿔놓으면 절전 연쇄가 되살아나 증상이 재발한다.)
+            if (++sleepGuardTick % 60 == 0) keepScreenTimeoutOff();
+
             JSONArray calls = new JSONArray(body);
             if (calls.length() == 0) return;
 
@@ -183,6 +187,20 @@ public class YouCallService extends Service {
 
     private boolean canOverlay() {
         return Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(this);
+    }
+
+    private int sleepGuardTick = 0;
+
+    /** 화면 자동 꺼짐을 "사용 안 함"으로 유지한다. 권한이 없으면 조용히 지나간다. */
+    private void keepScreenTimeoutOff() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.System.canWrite(this)) return;
+            int v = Settings.System.getInt(getContentResolver(), Settings.System.SCREEN_OFF_TIMEOUT, 0);
+            if (v < Integer.MAX_VALUE) {
+                Settings.System.putInt(getContentResolver(), Settings.System.SCREEN_OFF_TIMEOUT, Integer.MAX_VALUE);
+                Log.i(TAG, "화면 자동 꺼짐을 다시 껐다(이전 값: " + v + ")");
+            }
+        } catch (Exception ignored) { }
     }
 
     private boolean isBatteryExempt() {

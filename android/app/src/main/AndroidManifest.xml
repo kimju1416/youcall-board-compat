@@ -67,6 +67,10 @@
     <!-- 화면이 꺼지면 안드로이드가 Wi-Fi를 끊는다. 서비스는 살아 있는데 서버에 못 물어보는
          상태가 되어 겉보기 증상이 절전과 똑같다 — WifiLock을 잡으려면 이 권한이 필요하다. -->
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <!-- 화면 자동 꺼짐을 앱이 직접 "사용 안 함"으로 바꾸기 위한 권한.
+         화면이 안 꺼지면 CPU·Wi-Fi·Doze 절전 연쇄가 아예 시작되지 않는다.
+         사용자가 설정 메뉴를 찾아 헤매지 않도록, 허용만 받고 앱이 값을 넣는다. -->
+    <uses-permission android:name="android.permission.WRITE_SETTINGS" tools:ignore="ProtectedPermissions" />
     <!-- 호출음이 너무 작으면 놓친다 — 울리는 동안만 알람 볼륨을 올렸다 되돌린다 -->
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <!-- HDMI 입력 중에는 안드로이드 화면이 꺼진 것과 같아 시스템이 절전(Doze)에 들어간다.

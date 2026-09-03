@@ -15,7 +15,11 @@ public class MainActivity extends BridgeActivity {
      *  — 화면이 떠 있으면 웹이 사용자가 고른 호출음을 내므로 서비스는 조용히 있는다. */
     public static volatile boolean inForeground = false;
 
-    @Override public void onResume() { super.onResume(); inForeground = true; }
+    @Override public void onResume() {
+        super.onResume();
+        inForeground = true;
+        applyNeverSleep();   // 권한을 방금 켜고 돌아온 경우 여기서 바로 적용된다
+    }
     @Override public void onPause() { inForeground = false; super.onPause(); }
 
     @Override
@@ -41,7 +45,66 @@ public class MainActivity extends BridgeActivity {
         YouCallService.start(this);
 
         // 한 번에 하나만 안내한다(다이얼로그가 겹치면 아무도 안 읽는다).
-        if (!askOverlayPermissionIfNeeded()) askBatteryExemptionIfNeeded();
+        // 화면 꺼짐을 먼저 묻는다 — 화면이 안 꺼지면 절전도 Wi-Fi 끊김도 애초에 안 생긴다.
+        if (!askScreenTimeoutIfNeeded())
+            if (!askOverlayPermissionIfNeeded())
+                askBatteryExemptionIfNeeded();
+    }
+
+    /**
+     * **이 앱의 절전 문제를 뿌리에서 없애는 설정.**
+     * HDMI를 보는 동안 안드로이드는 "화면이 꺼진 상태"가 되고, 그때부터 CPU·Wi-Fi·Doze가
+     * 차례로 잠들어 호출을 못 받는다. 화면이 아예 안 꺼지게 하면 그 연쇄가 시작되지 않는다.
+     * 전자칠판은 콘센트에 꽂혀 있으므로 배터리 걱정이 없다.
+     * 설정 메뉴를 사람이 찾아 헤맬 필요 없게, 허용만 받고 **앱이 직접 바꾼다.**
+     */
+    private boolean askScreenTimeoutIfNeeded() {
+        if (screenTimeoutIsNever()) return false;               // 이미 안 꺼짐이면 아무것도 안 한다
+
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.System.canWrite(this)) {
+            applyNeverSleep();                                   // 권한이 있으면 조용히 적용
+            return false;
+        }
+
+        new AlertDialog.Builder(this)
+            .setTitle("화면이 꺼지면 호출을 못 받습니다")
+            .setMessage(
+                "HDMI(노트북·중앙방송)를 보는 동안 칠판의 안드로이드는 '화면이 꺼진 상태'가 됩니다.\n"
+                    + "그러면 인터넷이 끊겨 호출이 오지 않다가, 화면을 켤 때 밀린 호출이 한꺼번에 뜹니다.\n\n"
+                    + "'화면 자동 꺼짐'을 꺼야 해결됩니다. 설정을 직접 찾으실 필요 없이,\n"
+                    + "[허용하기]를 눌러 권한만 켜주시면 앱이 알아서 바꿉니다.\n\n"
+                    + "칠판은 전원에 연결되어 있어 배터리 걱정은 없습니다."
+            )
+            .setPositiveButton("허용하기", (d, w) -> {
+                try {
+                    Intent i = new Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS);
+                    i.setData(Uri.parse("package:" + getPackageName()));
+                    startActivity(i);
+                } catch (Exception ignored) {
+                    try { startActivity(new Intent(Settings.ACTION_DISPLAY_SETTINGS)); } catch (Exception ignored2) { }
+                }
+            })
+            .setNegativeButton("나중에", null)
+            .show();
+        return true;
+    }
+
+    /** 화면 자동 꺼짐이 이미 "사용 안 함"인지. */
+    private boolean screenTimeoutIsNever() {
+        try {
+            int v = Settings.System.getInt(getContentResolver(), Settings.System.SCREEN_OFF_TIMEOUT, 0);
+            return v >= NEVER_SLEEP;      // 안드로이드는 이 값을 "안 꺼짐"으로 다룬다
+        } catch (Exception e) { return false; }
+    }
+
+    static final int NEVER_SLEEP = Integer.MAX_VALUE;
+
+    /** 화면 자동 꺼짐을 없앤다. 권한이 없으면 아무 일도 일어나지 않는다(예외도 삼킨다). */
+    void applyNeverSleep() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.System.canWrite(this)) return;
+            Settings.System.putInt(getContentResolver(), Settings.System.SCREEN_OFF_TIMEOUT, NEVER_SLEEP);
+        } catch (Exception ignored) { }
     }
 
     /**
