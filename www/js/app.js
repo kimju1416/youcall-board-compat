@@ -773,6 +773,11 @@ function showLastPollBadge() {
       el.id = 'pollBadge';
       el.className = 'chip';
       el.style.fontSize = '11px';
+      el.style.cursor = 'pointer';
+      el.title = '눌러서 상태 보기';
+      // 눌러 보면 "이 칠판에서 입력 전환으로 쓸 만한 것을 찾았는지"가 나온다.
+      // HDMI를 보는 동안 화면이 안 뜨는 이유를 현장에서 바로 가릴 수 있게 하는 창구다.
+      el.addEventListener('click', showSourceReport);
       head.insertBefore(el, head.firstChild);
     }
     if (!ms) { el.textContent = '뒤 감시: 기록 없음'; el.style.color = '#b03030'; return; }
@@ -788,6 +793,29 @@ function showLastPollBadge() {
   }
   tick();
   setInterval(tick, 15000);
+}
+
+// 「뒤 감시」 배지를 누르면 나오는 진단. 이 칠판에서 입력 전환에 쓸 만한 것을
+// 앱이 찾아냈는지 보여준다 — 못 찾았으면 자동 전환은 불가능하다는 뜻이고,
+// 찾았으면 그 이름이 다음 판에서 정확히 겨냥할 표적이 된다.
+function showSourceReport() {
+  var P = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.Preferences;
+  if (!P) { alert('앱에서만 볼 수 있습니다.'); return; }
+  Promise.resolve(P.get({ key: 'yc_source_report' })).then(function (r) {
+    var lines = [];
+    try {
+      var o = JSON.parse((r && r.value) || '{}');
+      var c = o.candidates || [];
+      lines.push('■ 칠판 입력 전환 후보: ' + c.length + '개');
+      if (c.length) lines.push(c.join('\n'));
+      else lines.push('(찾지 못함 — 이 칠판은 앱이 입력을 바꿀 수 없습니다)');
+      if (o.lastTry) lines.push('\n■ 마지막 시도\n' + o.lastTry);
+      if (o.at) lines.push('\n(' + new Date(o.at).toLocaleString('ko-KR') + ')');
+    } catch (e) {
+      lines.push('아직 기록이 없습니다. 호출이 한 번 와야 기록됩니다.');
+    }
+    alert(lines.join('\n'));
+  }).catch(function () { alert('기록을 읽지 못했습니다.'); });
 }
 
 // 네이티브 저장소에 끝내 못 썼을 때 — 화면 위쪽에 남긴다.

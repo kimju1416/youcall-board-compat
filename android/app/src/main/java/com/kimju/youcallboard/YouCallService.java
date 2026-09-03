@@ -111,6 +111,17 @@ public class YouCallService extends Service {
         // 죽기 전에 이미 알린 호출들을 되살린다 — 부활 직후 같은 호출로 다시 울리지 않게.
         try { loadAlerted(getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE)); } catch (Exception ignored) { }
 
+        // 이 칠판에 "입력 전환"으로 쓸 만한 것이 있는지 미리 훑어 둔다(설치된 앱 조회는 무거워서 딴 스레드에서).
+        // 호출이 오기 전에도 앱 화면에서 확인할 수 있어야, 안 될 칠판인지 바로 가려진다.
+        new Thread(new Runnable() {
+            @Override public void run() {
+                try {
+                    SourceSwitcher.writeReport(YouCallService.this,
+                        getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE), null);
+                } catch (Exception ignored) { }
+            }
+        }).start();
+
         running = true;
         handler.post(pollTask);
     }
@@ -328,7 +339,7 @@ public class YouCallService extends Service {
 
     /** 호출이 왔을 때 앱을 화면 앞으로. 권한이 있으면 즉시 띄우고, 없으면 전체화면 인텐트 알림으로 대체한다. */
     private void bringAppToFront(String num, String name, String teacher, String message) {
-        Intent open = new Intent(this, MainActivity.class);
+        final Intent open = new Intent(this, MainActivity.class);
         open.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
 
         String title = "📣 " + num + "번 " + name + " 학생 호출";
@@ -360,6 +371,25 @@ public class YouCallService extends Service {
 
         // "다른 앱 위에 표시" 권한이 있으면 백그라운드에서도 액티비티를 직접 띄울 수 있다(가장 확실)
         boolean canOverlay = Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(this);
+
+        if (!MainActivity.inForeground) {
+            // 화면이 앞에 없다 = HDMI를 보고 있을 수 있다. 칠판 입력을 안드로이드로 되돌려 본다.
+            // 되돌아가야 우리가 띄우는 호출 화면이 실제로 보인다. 실패해도 해가 없다.
+            try {
+                String tryLog = SourceSwitcher.tryReturnToAndroid(this);
+                SourceSwitcher.writeReport(this, getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE), tryLog);
+            } catch (Exception e) { Log.w(TAG, "입력 전환 시도 실패: " + e.getMessage()); }
+
+            // 입력이 바뀌는 데 시간이 걸린다. 곧바로 띄우면 전환 화면에 가려지므로 조금 늦춰 다시 올린다.
+            if (canOverlay) {
+                handler.postDelayed(new Runnable() {
+                    @Override public void run() {
+                        try { startActivity(open); } catch (Exception ignored) { }
+                    }
+                }, 2500L);
+            }
+        }
+
         if (canOverlay) {
             try { startActivity(open); } catch (Exception e) { Log.w(TAG, "startActivity 실패: " + e.getMessage()); }
         }
