@@ -45,6 +45,12 @@
             </intent-filter>
         </receiver>
 
+        <!-- 칠판이 HDMI로 넘어가며 앱을 죽여도 1분마다 스스로를 다시 세운다 -->
+        <receiver
+            android:name=".YouCallService$ReviveReceiver"
+            android:enabled="true"
+            android:exported="false" />
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"
@@ -58,6 +64,11 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- 화면이 꺼지면 안드로이드가 Wi-Fi를 끊는다. 서비스는 살아 있는데 서버에 못 물어보는
+         상태가 되어 겉보기 증상이 절전과 똑같다 — WifiLock을 잡으려면 이 권한이 필요하다. -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <!-- 호출음이 너무 작으면 놓친다 — 울리는 동안만 알람 볼륨을 올렸다 되돌린다 -->
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <!-- HDMI 입력 중에는 안드로이드 화면이 꺼진 것과 같아 시스템이 절전(Doze)에 들어간다.
          그러면 포그라운드 서비스라도 네트워크가 끊겨 호출을 못 받고, 화면을 깨우는 순간
          밀린 호출이 한꺼번에 뜬다(2026-09-02 제보 증상). 절전 제외를 요청할 수 있게 한다. -->

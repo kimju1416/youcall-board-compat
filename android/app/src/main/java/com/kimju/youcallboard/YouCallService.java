@@ -57,6 +57,7 @@ public class YouCallService extends Service {
     public IBinder onBind(Intent intent) { return null; }
 
     private android.os.PowerManager.WakeLock wakeLock;
+    private android.net.wifi.WifiManager.WifiLock wifiLock;
 
     @Override
     public void onCreate() {
@@ -75,6 +76,20 @@ public class YouCallService extends Service {
                 wakeLock.acquire();
             }
         } catch (Exception e) { Log.w(TAG, "웨이크락 실패: " + e.getMessage()); }
+
+        // CPU를 깨워둬도 **Wi-Fi가 따로 잠든다.** 안드로이드는 화면이 꺼지면 Wi-Fi를 끊는데,
+        // 그러면 서비스는 멀쩡히 돌면서 서버에 물어보지 못한다 — 겉보기 증상은 절전과 똑같다.
+        // (칠판 업체 확인: 칠판 파워세이브는 꺼져 있다. 그러니 남은 건 안드로이드 쪽 Wi-Fi 절전이다.)
+        try {
+            android.net.wifi.WifiManager wm =
+                (android.net.wifi.WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+            if (wm != null) {
+                wifiLock = wm.createWifiLock(android.net.wifi.WifiManager.WIFI_MODE_FULL_HIGH_PERF, "youcall:wifi");
+                wifiLock.setReferenceCounted(false);
+                wifiLock.acquire();
+            }
+        } catch (Exception e) { Log.w(TAG, "와이파이락 실패: " + e.getMessage()); }
+
         running = true;
         handler.post(pollTask);
     }
@@ -89,6 +104,7 @@ public class YouCallService extends Service {
         running = false;
         handler.removeCallbacks(pollTask);
         try { if (wakeLock != null && wakeLock.isHeld()) wakeLock.release(); } catch (Exception ignored) { }
+        try { if (wifiLock != null && wifiLock.isHeld()) wifiLock.release(); } catch (Exception ignored) { }
         super.onDestroy();
     }
 
@@ -134,6 +150,13 @@ public class YouCallService extends Service {
             if (!isBatteryExempt()) warn += " · ⚠ 절전 제외 필요";
             if (!canOverlay()) warn += " · ⚠ 다른 앱 위에 표시 꺼짐";
             setOngoing(grade + "학년 " + classNum + "반 감시 중" + warn);
+
+            // 서버까지 다녀온 시각을 남긴다. 알림이 안 보이는 칠판에서도
+            // 앱을 열면 "뒤에서 언제까지 돌았는지"를 화면으로 확인할 수 있다 —
+            // HDMI를 보는 동안 죽어 있었는지 아닌지가 이 값 하나로 갈린다.
+            try {
+                sp.edit().putString("yc_last_poll", String.valueOf(System.currentTimeMillis())).apply();
+            } catch (Exception ignored) { }
 
             JSONArray calls = new JSONArray(body);
             if (calls.length() == 0) return;
@@ -230,14 +253,81 @@ public class YouCallService extends Service {
             .setFullScreenIntent(pi, true); // 잠금/절전 상태면 화면을 바로 띄운다
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) b.setPriority(Notification.PRIORITY_MAX);
 
-        NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
-        nm.notify(NOTI_CALL, b.build());
+        // 화면이 이미 앞에 떠 있으면 알림까지 울릴 필요가 없다(호출 화면이 크게 떠 있고 호출음도 난다).
+        // 알림 채널 소리와 웹 호출음이 겹치는 것을 막는다.
+        if (!MainActivity.inForeground) {
+            NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+            nm.notify(NOTI_CALL, b.build());
+        }
 
         // "다른 앱 위에 표시" 권한이 있으면 백그라운드에서도 액티비티를 직접 띄울 수 있다(가장 확실)
         boolean canOverlay = Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(this);
         if (canOverlay) {
             try { startActivity(open); } catch (Exception e) { Log.w(TAG, "startActivity 실패: " + e.getMessage()); }
         }
+
+        // 화면이 떠 있으면 웹이 사용자가 고른 호출음을 낸다 — 그때는 겹치지 않게 조용히 있는다.
+        // 화면을 못 띄우는 상황(HDMI 입력 중 등)에서만 서비스가 직접 울린다. 그때는 소리가 유일한 알림이다.
+        if (!MainActivity.inForeground) playAlarmOnce();
+    }
+
+    /**
+     * 화면을 못 띄우는 상황(HDMI 입력 중 등)에서는 소리가 유일한 알림이다.
+     * 칠판마다 어느 소리 길이 살아 있는지 모르므로 **여러 길로 동시에 시도한다.**
+     *   · 알람 스트림(ALARM) — 보통 마지막까지 살아남는 길
+     *   · 알림 스트림(NOTIFICATION) — 알람이 막힌 기기 대비
+     *   · 볼륨이 0이면 잠깐 올렸다가 되돌린다(꺼져 있으면 무엇을 해도 안 들린다)
+     */
+    private android.media.Ringtone ringAlarm, ringNoti;
+    private int savedAlarmVol = -1;
+    private void playAlarmOnce() {
+        try {
+            android.media.AudioManager am = (android.media.AudioManager) getSystemService(Context.AUDIO_SERVICE);
+            if (am != null) {
+                int max = am.getStreamMaxVolume(android.media.AudioManager.STREAM_ALARM);
+                int cur = am.getStreamVolume(android.media.AudioManager.STREAM_ALARM);
+                if (cur < max * 0.5) {           // 너무 작으면 호출을 놓친다
+                    savedAlarmVol = cur;
+                    am.setStreamVolume(android.media.AudioManager.STREAM_ALARM, (int) Math.ceil(max * 0.7), 0);
+                }
+            }
+            ringAlarm = playVia(android.media.RingtoneManager.TYPE_ALARM, android.media.AudioAttributes.USAGE_ALARM);
+            ringNoti = playVia(android.media.RingtoneManager.TYPE_NOTIFICATION, android.media.AudioAttributes.USAGE_NOTIFICATION);
+
+            handler.postDelayed(new Runnable() {
+                @Override public void run() {
+                    stopRing(ringAlarm); stopRing(ringNoti);
+                    try {   // 볼륨을 건드렸으면 되돌린다
+                        android.media.AudioManager m = (android.media.AudioManager) getSystemService(Context.AUDIO_SERVICE);
+                        if (m != null && savedAlarmVol >= 0) {
+                            m.setStreamVolume(android.media.AudioManager.STREAM_ALARM, savedAlarmVol, 0);
+                            savedAlarmVol = -1;
+                        }
+                    } catch (Exception ignored) { }
+                }
+            }, 10_000L);
+        } catch (Exception e) { Log.w(TAG, "호출음 재생 실패: " + e.getMessage()); }
+    }
+
+    private android.media.Ringtone playVia(int ringtoneType, int usage) {
+        try {
+            android.net.Uri u = android.media.RingtoneManager.getDefaultUri(ringtoneType);
+            if (u == null) return null;
+            android.media.Ringtone r = android.media.RingtoneManager.getRingtone(getApplicationContext(), u);
+            if (r == null) return null;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                r.setAudioAttributes(new android.media.AudioAttributes.Builder()
+                    .setUsage(usage)
+                    .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                    .build());
+            }
+            r.play();
+            return r;
+        } catch (Exception e) { return null; }
+    }
+
+    private void stopRing(android.media.Ringtone r) {
+        try { if (r != null && r.isPlaying()) r.stop(); } catch (Exception ignored) { }
     }
 
     private Notification buildOngoingNotification(String text) {
@@ -272,7 +362,18 @@ public class YouCallService extends Service {
         NotificationChannel call = new NotificationChannel(CH_CALL, "학생 호출", NotificationManager.IMPORTANCE_HIGH);
         call.setDescription("교무실에서 학생을 호출했을 때 화면을 띄운다");
         call.enableVibration(false);
-        call.setSound(null, null); // 소리는 화면에 뜬 앱이 설정된 호출음으로 재생한다
+        // 예전에는 여기서 소리를 껐다(setSound(null, null)) — "소리는 화면에 뜬 앱이 낸다"는 전제였다.
+        // 그런데 HDMI(노트북·중앙방송)를 보고 있으면 앱이 화면에 못 떠서 **소리도 안 난다**(실제 제보).
+        // 화면을 못 띄우는 상황일수록 소리가 유일한 알림이므로, 알람 속성으로 직접 울린다.
+        try {
+            android.net.Uri alarm = android.media.RingtoneManager.getDefaultUri(android.media.RingtoneManager.TYPE_ALARM);
+            if (alarm == null) alarm = android.media.RingtoneManager.getDefaultUri(android.media.RingtoneManager.TYPE_NOTIFICATION);
+            android.media.AudioAttributes attrs = new android.media.AudioAttributes.Builder()
+                .setUsage(android.media.AudioAttributes.USAGE_ALARM)
+                .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                .build();
+            call.setSound(alarm, attrs);
+        } catch (Exception e) { Log.w(TAG, "호출음 채널 설정 실패: " + e.getMessage()); }
         nm.createNotificationChannel(call);
     }
 
@@ -280,5 +381,34 @@ public class YouCallService extends Service {
         Intent i = new Intent(ctx, YouCallService.class);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) ctx.startForegroundService(i);
         else ctx.startService(i);
+        scheduleRevive(ctx);
+    }
+
+    /**
+     * 전자칠판이 HDMI로 넘어갈 때 이 앱을 통째로 재우거나 죽이는 기종이 있다.
+     * START_STICKY로도 안 살아나는 경우가 있어, 알람으로 1분마다 스스로를 다시 세운다.
+     * setExactAndAllowWhileIdle은 절전 중에도 깨어나는 유일한 알람이다.
+     */
+    static void scheduleRevive(Context ctx) {
+        try {
+            android.app.AlarmManager am = (android.app.AlarmManager) ctx.getSystemService(Context.ALARM_SERVICE);
+            if (am == null) return;
+            Intent i = new Intent(ctx, ReviveReceiver.class);
+            PendingIntent pi = PendingIntent.getBroadcast(
+                ctx, 77, i,
+                PendingIntent.FLAG_UPDATE_CURRENT | (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M ? PendingIntent.FLAG_IMMUTABLE : 0)
+            );
+            long at = System.currentTimeMillis() + 60_000L;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) am.setExactAndAllowWhileIdle(android.app.AlarmManager.RTC_WAKEUP, at, pi);
+            else am.setExact(android.app.AlarmManager.RTC_WAKEUP, at, pi);
+        } catch (Exception e) { Log.w(TAG, "부활 알람 실패: " + e.getMessage()); }
+    }
+
+    /** 알람이 깨우면 서비스를 다시 세우고 다음 알람을 건다. */
+    public static class ReviveReceiver extends android.content.BroadcastReceiver {
+        @Override
+        public void onReceive(Context ctx, Intent intent) {
+            try { YouCallService.start(ctx); } catch (Exception ignored) { }
+        }
     }
 }

@@ -758,6 +758,38 @@ function wireCfgModal() {
   });
 }
 
+// 상주 서비스가 서버까지 다녀온 마지막 시각을 헤더에 보여준다.
+// 알림이 안 보이는 칠판에서도 이 배지 하나로 "뒤에서 돌고 있었는지"가 갈린다 —
+// HDMI를 한참 보다가 앱을 열었을 때 "방금 전"이면 정상, "20분 전"이면 그동안 죽어 있던 것.
+function showLastPollBadge() {
+  var P = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.Preferences;
+  if (!P) return;
+  function render(ms) {
+    var head = document.querySelector('.hright');
+    if (!head) return;
+    var el = document.getElementById('pollBadge');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'pollBadge';
+      el.className = 'chip';
+      el.style.fontSize = '11px';
+      head.insertBefore(el, head.firstChild);
+    }
+    if (!ms) { el.textContent = '뒤 감시: 기록 없음'; el.style.color = '#b03030'; return; }
+    var sec = Math.max(0, Math.round((Date.now() - ms) / 1000));
+    var txt = sec < 90 ? (sec + '초 전') : (Math.round(sec / 60) + '분 전');
+    el.textContent = '뒤 감시: ' + txt;
+    el.style.color = sec > 180 ? '#b03030' : '';   // 3분 넘게 소식 없으면 붉게
+  }
+  function tick() {
+    Promise.resolve(P.get({ key: 'yc_last_poll' }))
+      .then(function (r) { render(r && r.value ? parseInt(r.value, 10) : 0); })
+      .catch(function () { });
+  }
+  tick();
+  setInterval(tick, 15000);
+}
+
 // 네이티브 저장소에 끝내 못 썼을 때 — 화면 위쪽에 남긴다.
 // 이 표시가 보이면 "앱을 열었을 때만 호출이 뜨는" 상태라는 뜻이다.
 function showNativeSyncWarning() {
@@ -799,6 +831,8 @@ window.addEventListener('DOMContentLoaded', function () {
   applyPrefsToUI(SETTINGS);
 
   if (!isConfigured()) { openCfgModal(); return; }
+
+  showLastPollBadge();   // 뒤에서 감시가 언제까지 돌았는지 헤더에 남긴다
 
   // 켤 때마다 네이티브 저장소를 다시 맞춘다 — 한 번 실패했더라도 여기서 복구된다.
   // 끝내 안 되면 헤더에 표시한다(조용히 지나가면 "왜 호출이 안 오지"로만 남는다).

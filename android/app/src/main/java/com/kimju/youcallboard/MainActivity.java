@@ -10,6 +10,14 @@ import android.view.WindowManager;
 import com.getcapacitor.BridgeActivity;
 
 public class MainActivity extends BridgeActivity {
+
+    /** 이 화면이 지금 앞에 있는지. 서비스가 소리를 낼지 말지 이 값으로 가른다
+     *  — 화면이 떠 있으면 웹이 사용자가 고른 호출음을 내므로 서비스는 조용히 있는다. */
+    public static volatile boolean inForeground = false;
+
+    @Override public void onResume() { super.onResume(); inForeground = true; }
+    @Override public void onPause() { inForeground = false; super.onPause(); }
+
     @Override
     public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
