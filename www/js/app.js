@@ -368,7 +368,7 @@ function renderClassMemo(memo, step) {
   var el = document.getElementById('classMemoText'); if (!el) return;
   if (step !== undefined && step !== null) MEMO_STEP = step;
   if (memo && memo.trim()) { el.textContent = memo; el.classList.remove('empty'); }
-  else { el.textContent = '설정 시트 "학급 메모"에 문구를 입력하면 여기에 표시됩니다.'; el.classList.add('empty'); }
+  else { el.textContent = '교사용 화면의 「우리 반 공지」에서 메모를 적으면 여기에 표시됩니다.'; el.classList.add('empty'); }
   fitClassMemo();
   if (document.fonts && document.fonts.ready) document.fonts.ready.then(refitAll);
 }
