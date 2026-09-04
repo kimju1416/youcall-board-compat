@@ -13,3 +13,5 @@ payload.json
 *.keystore
 keystore.properties
 YouCallBoard.apk
+YouCallBoard-compat.apk
+tools/shot-*.png
