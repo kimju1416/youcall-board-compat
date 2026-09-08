@@ -319,13 +319,16 @@ function applyPrefsToUI(s) {
 
 /* ===== 시정 계산 (원본과 동일) ===== */
 function toMinutes(hhmm) { var p = String(hhmm).split(':'); return parseInt(p[0]) * 60 + parseInt(p[1]); }
+/* 점심은 그 교시가 끝나는 «즉시» 시작한다 — 쉬는시간을 따로 더하지 않는다.
+   예전에는 쉬는시간을 먼저 더한 뒤 점심을 시작해 점심 이후 교시가 10분씩 늦게 표시됐다.
+   ※ 웹(GAS index.html)·APK·호환판·EXE 네 곳에 같은 사본이 있다 — 반드시 같이 고친다. */
 function buildSchedule(cfg) {
   var t = toMinutes(cfg.start), slots = [];
   for (var n = 1; n <= cfg.maxPeriod; n++) {
     var s = t, e = t + cfg.periodLen;
     slots.push({ type: 'period', period: n, start: s, end: e });
-    t = e + cfg.breakLen;
-    if (n === cfg.lunchAfter) { var ls = t, le = t + cfg.lunchLen; slots.push({ type: 'lunch', start: ls, end: le }); t = le; }
+    if (n === cfg.lunchAfter) { var ls = e, le = e + cfg.lunchLen; slots.push({ type: 'lunch', start: ls, end: le }); t = le; }
+    else { t = e + cfg.breakLen; }
   }
   return slots;
 }
