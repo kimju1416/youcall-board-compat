@@ -546,7 +546,9 @@ function renderPeriodRow(list) {
   // 형태가 어긋나면 "수업 없음"으로 조용히 넘어가는 편이 낫다.
   if (!Array.isArray(list)) list = [];
   _todaySubjects = {};
-  list.forEach(function (x) { _todaySubjects[x.period] = x.subject; });
+  // 같은 교시가 두 줄로 오고 하나는 과목이 비어 있는 학교가 있다(옛 판 GAS 사본).
+  // 빈 줄이 뒤에 와서 멀쩡한 과목을 지우지 않게 막는다. 새 GAS(v4.23~)는 서버에서 이미 걸러 준다.
+  list.forEach(function (x) { if (x.subject || !_todaySubjects[x.period]) _todaySubjects[x.period] = x.subject; });
   var row = document.getElementById('periodRow'); if (!row) return;
   if (!list || !list.length) { row.innerHTML = '<div class="today-empty">오늘은 수업이 없어요</div>'; return; }
   row.innerHTML = '';
