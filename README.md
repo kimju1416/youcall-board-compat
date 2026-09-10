@@ -160,7 +160,9 @@ cd android && ./gradlew.bat clean assembleRelease
 빌드하려면 프로젝트 루트에 `youcall-compat.keystore`와 `keystore.properties`가 필요합니다(저장소에 포함되지 않음).
 `android/local.properties`도 gitignore라 새 환경에서는 `sdk.dir=C:/Android` 한 줄을 직접 만들어야 합니다.
 
-### 기본판(youcall-board)과의 차이 — 이 세 곳뿐입니다
+### 기본판(youcall-board)과의 차이
+
+빌드 설정은 아래 세 곳이 다릅니다.
 
 | 파일 | 변경 |
 |---|---|
@@ -168,7 +170,13 @@ cd android && ./gradlew.bat clean assembleRelease
 | `android/app/build.gradle` | `applicationId`에 `.compat` · `enableV1Signing = true` · v3/v4 서명 끔 |
 | `strings.xml` · `capacitor.config.json` | 앱 이름 「유콜 보드 (호환)」 |
 
-화면·기능 코드(`www/`)는 기본판과 **내용이 동일**합니다(줄바꿈 표기만 CRLF/LF로 다름 — 두 APK에서 꺼낸 `app.js`를 `tr -d '\r'` 후 해시 대조해 확인). 기본판이 갱신되면 `www/`만 가져와 다시 빌드하세요.
+화면·기능 코드는 기본판과 **같지 않습니다.** `www/index.html`·`www/style.css`는 기본판과 같지만,
+`www/js/app.js`에는 호환판 전용 코드가 더 있습니다 — 네이티브 저장소 동기화·되읽기 확인(`syncNativeSettings`),
+헤더의 «뒤 감시» 배지와 입력 전환 진단(`showLastPollBadge`·`showSourceReport`), 동기화 실패 경고(`showNativeSyncWarning`).
+`YouCallService.java`도 호환판에만 알린 호출 기록 저장·웨이크락/와이파이락·입력 전환(`SourceSwitcher`)·직접 호출음이 있습니다.
+
+**기본판 `www/`를 통째로 복사해 덮으면 이 코드가 사라집니다.** 기본판을 고치면 같은 뜻의 수정을 파일마다 따로 옮기고,
+`node tests/test-v120.js`로 검사하세요(호환판 전용 코드가 살아 있는지도 함께 봅니다).
 
 ### Android 6.0 실측 결과
 

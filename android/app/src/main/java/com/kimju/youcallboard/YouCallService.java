@@ -161,6 +161,32 @@ public class YouCallService extends Service {
         }
     };
 
+    /**
+     * 설정 주소에서 교사용 쿼리(role·k)와 #해시를 뗀다. k는 교사 열쇠라 칠판 요청에 실려 나가면 안 된다.
+     * 화면(app.js)이 저장할 때·켤 때 이미 떼지만, 옛 판이 저장해 둔 값은 앱을 한 번 열기 전까지 그대로 남아 있다.
+     */
+    static String stripTeacherParams(String base) {
+        if (base == null) return "";
+        String s = base.trim();
+        int hash = s.indexOf('#');
+        if (hash >= 0) s = s.substring(0, hash);
+        int q = s.indexOf('?');
+        if (q < 0) return s;
+        StringBuilder out = new StringBuilder(s.substring(0, q));
+        boolean first = true;
+        for (String pair : s.substring(q + 1).split("&")) {
+            if (pair.isEmpty()) continue;
+            int eq = pair.indexOf('=');
+            String name = eq >= 0 ? pair.substring(0, eq) : pair;
+            try { name = java.net.URLDecoder.decode(name, "UTF-8"); } catch (Exception ignored) { }
+            name = name.toLowerCase(java.util.Locale.ROOT);
+            if (name.equals("role") || name.equals("k")) continue;
+            out.append(first ? '?' : '&').append(pair);
+            first = false;
+        }
+        return out.toString();
+    }
+
     private void pollOnce() {
         try {
             SharedPreferences sp = getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE);
@@ -170,7 +196,7 @@ public class YouCallService extends Service {
             if (raw == null) { setOngoing("설정을 기다리는 중 — 앱을 열어 저장해 주세요"); return; }
 
             JSONObject cfg = new JSONObject(raw);
-            String base = cfg.optString("webAppUrl", "");
+            String base = stripTeacherParams(cfg.optString("webAppUrl", ""));
             String grade = cfg.optString("grade", "");
             String classNum = cfg.optString("classNum", "");
             if (base.isEmpty() || grade.isEmpty() || classNum.isEmpty()) {

@@ -1,0 +1,501 @@
+'use strict';
+/* 유콜 보드 — 서버 v4.24 대응 검사 (test-v120)
+
+   app.js는 즉시실행 함수 안이라 require로 부를 수 없다. 그래서 «함수 원문을 이름으로 떼어» node vm에 넣고,
+   그 함수가 기대는 전역(document·localStorage·api 등)만 가짜로 채워 돌린다.
+   검사 파일에 함수 사본을 따로 두지 않는 이유 — 사본은 앱이 바뀌어도 그대로라 «검사는 통과, 앱은 고장»이 된다.
+   떼는 규칙: app.js의 최상위 함수는 0칸 들여쓰기로 시작하고 0칸의 `}`로 끝난다(한 줄짜리는 그 줄).
+
+     node tests/test-v120.js                                이 저장소 www/js/app.js
+     node tests/test-v120.js <app.js> [<YouCallService.java>]  다른 사본(고치기 전 원본 등)과 대조
+
+   «오늘»에 기대면 주말에 거짓 실패가 난다 — 날짜는 전부 가짜 Date로 고정한다. */
+const fs = require('fs');
+const path = require('path');
+const vm = require('vm');
+
+const FLAVOR = 'compat';    // 'android' = 기본판, 'compat' = 호환판(전용 코드 회귀 검사가 더 돈다)
+const ROOT = path.join(__dirname, '..');
+const APP = process.argv[2] || path.join(ROOT, 'www', 'js', 'app.js');
+const JAVA = process.argv[3] || path.join(ROOT, 'android', 'app', 'src', 'main', 'java', 'com', 'kimju', 'youcallboard', 'YouCallService.java');
+const SRC = fs.readFileSync(APP, 'utf8').replace(/\r\n/g, '\n');
+const JSRC = fs.readFileSync(JAVA, 'utf8').replace(/\r\n/g, '\n');
+const LINES = SRC.split('\n');
+
+/* ---------- 원문 떼기 ---------- */
+function fn(name) {
+  const re = new RegExp('^(async )?function ' + name + '\\s*\\(');
+  const i = LINES.findIndex(l => re.test(l));
+  if (i < 0) throw new Error('app.js에 함수가 없음: ' + name);
+  const first = LINES[i];
+  const open = (first.match(/\{/g) || []).length, close = (first.match(/\}/g) || []).length;
+  if (open > 0 && open === close) return first;
+  for (let j = i + 1; j < LINES.length; j++) if (/^\}/.test(LINES[j])) return LINES.slice(i, j + 1).join('\n');
+  throw new Error('함수 끝을 못 찾음: ' + name);
+}
+function varLine(name) {
+  const re = new RegExp('^var ' + name + '\\s*=');
+  const i = LINES.findIndex(l => re.test(l));
+  if (i < 0) throw new Error('app.js에 변수가 없음: ' + name);
+  if (/;\s*(\/\/.*)?$/.test(LINES[i])) return LINES[i];
+  for (let j = i + 1; j < LINES.length; j++) if (/^\};?/.test(LINES[j])) return LINES.slice(i, j + 1).join('\n');
+  throw new Error('변수 끝을 못 찾음: ' + name);
+}
+function has(name) { try { fn(name); return true; } catch (e) { return false; } }
+
+/* ---------- 가짜 환경 ---------- */
+function escText(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+// innerHTML을 새로 넣으면 자식이 비워지는 실제 DOM 동작까지 흉내 낸다 — 다시 그릴 때 칸이 쌓이는 결함을 잡으려고.
+class El {
+  constructor(tag) {
+    this.tagName = tag; this.children = []; this._html = ''; this.id = ''; this.className = ''; this.title = '';
+    this.style = { setProperty() {}, getPropertyValue() { return ''; } };
+    const self = this;
+    this.classList = {
+      add(c) { if (!this.contains(c)) self.className = (self.className ? self.className + ' ' : '') + c; },
+      remove(c) { self.className = self.className.split(/\s+/).filter(x => x && x !== c).join(' '); },
+      contains(c) { return self.className.split(/\s+/).indexOf(c) >= 0; }
+    };
+  }
+  set innerHTML(v) { this._html = String(v); this.children = []; }
+  get innerHTML() { return this._html + this.children.map(c => c.outerHTML).join(''); }
+  set textContent(v) { this._html = escText(v); this.children = []; }
+  get textContent() { return this._html; }
+  get outerHTML() {
+    return '<' + this.tagName + (this.className ? ' class="' + this.className + '"' : '') + (this.id ? ' id="' + this.id + '"' : '') + '>' + this.innerHTML + '</' + this.tagName + '>';
+  }
+  appendChild(c) { this.children.push(c); return c; }
+  querySelector() { return null; }
+}
+function makeDoc() {
+  const reg = {};
+  ['periodRow', 'weekWrap', 'mealList'].forEach(id => { reg[id] = new El('div'); reg[id].id = id; });
+  return { reg, getElementById: id => reg[id] || null, createElement: t => new El(t), querySelectorAll: () => [], querySelector: () => null };
+}
+function makeStorage(init) {
+  const m = Object.assign({}, init || {});
+  return { m, getItem: k => (k in m ? m[k] : null), setItem: (k, v) => { m[k] = String(v); }, removeItem: k => { delete m[k]; } };
+}
+const PRELUDE = [
+  'var SETTINGS = null, SCHEDULE = [];',
+  'var _todaySubjects = {}, _todayItems = {}, _todayLoaded = false, _todayCount = 0, _todayLastPeriod = 0, _weekHasData = false;',
+  'var _lastTodayList = null, _lastWeekMap = null;',
+  'function fitWeekBox() {} function fitMealBox() {} function refitAll() {}',
+  // 가짜 Date — 인자 없이 만들면 __NOW(검사가 정한 시각)
+  'var __NOW = 0; (function () { var R = Date; class D extends R { constructor(...a) { if (a.length) super(...a); else super(__NOW); } static now() { return __NOW; } } globalThis.Date = D; })();'
+].join('\n');
+
+function sandbox(names, opts) {
+  opts = opts || {};
+  const doc = makeDoc();
+  const c = Object.assign({ console, URL, setTimeout, clearTimeout, setImmediate, document: doc, localStorage: makeStorage(opts.storage) }, opts.globals || {});
+  vm.createContext(c);
+  vm.runInContext(PRELUDE, c);
+  const parts = [];
+  (opts.vars || []).forEach(v => parts.push(varLine(v)));
+  // 시정 저장 키는 있으면 늘 싣는다(없는 옛 코드에서는 기능 검사가 제 이유로 실패하게)
+  try { parts.push(varLine('PERIOD_CONFIG_KEY')); } catch (e) { /* 옛 코드 */ }
+  names.forEach(n => parts.push(fn(n)));
+  // escHtml도 있으면 싣는다 — «escHtml 없음»으로 실패하면 고치기 전 코드의 진짜 결함(이스케이프·교체 표시)이 가려진다
+  (opts.optional || []).concat(names.indexOf('escHtml') < 0 ? ['escHtml'] : []).forEach(n => { if (has(n)) parts.push(fn(n)); });
+  if (opts.after) parts.push(opts.after);
+  vm.runInContext(parts.join('\n'), c, { filename: 'app.js 조각' });
+  c.__doc = doc;
+  return c;
+}
+const RENDER = ['toMinutes', 'buildSchedule', 'ymdKey', 'renderPeriodRow', 'renderWeek', 'currentPeriodStatus'];
+function renderBox(extra, opts) {
+  opts = opts || {};
+  const c = sandbox(RENDER.concat(extra || []), { vars: ['PERIOD_CONFIG'], optional: ['effectiveSchedule', 'validPeriodConfig', 'applyPeriodConfig'], storage: opts.storage, after: 'SCHEDULE = buildSchedule(PERIOD_CONFIG);' });
+  c.__NOW = new Date(2026, 8, 15, 10, 23).getTime();   // 2026-09-15(화) 10:23 — 3교시
+  return c;
+}
+function weekKeys() {   // 가짜 «오늘»(9/15 화)이 든 주의 월~금
+  return ['20260914', '20260915', '20260916', '20260917', '20260918'];
+}
+function subjWeek(n) {
+  const subj = ['국어', '수학', '영어', '과학', '사회', '체육', '음악'];
+  const w = {};
+  weekKeys().forEach((k, i) => { w[k] = subj.slice(0, n || 7).map((s, j) => ({ period: j + 1, subject: subj[(i + j) % 7] })); });
+  return w;
+}
+function todayList(n) { return subjWeek(n)['20260915'].map(x => Object.assign({}, x)); }
+const flush = () => new Promise(r => setImmediate(r));
+
+/* ---------- 검사 틀 ---------- */
+const results = [];
+function check(name, body) { results.push({ name, body }); }
+function ok(cond, msg) { if (!cond) throw new Error(msg); }
+function same(a, b, msg) {
+  const A = JSON.stringify(a), B = JSON.stringify(b);
+  if (A !== B) throw new Error(msg + '\n      받은 값: ' + A + '\n      기대 값: ' + B);
+}
+
+/* ===== 1. 주소 위생 ===== */
+check('1-1 cleanWebAppUrl: 교사 주소의 role·k·#해시를 떼고 https를 붙인다', () => {
+  const c = sandbox(['normalizeWebAppUrl', 'cleanWebAppUrl']);
+  same(c.cleanWebAppUrl('script.google.com/macros/s/AKfy/exec?role=teacher&k=S3CRET#top'), 'https://script.google.com/macros/s/AKfy/exec', '교사 주소');
+  same(c.cleanWebAppUrl('https://script.google.com/macros/s/X/exec?k=1&foo=bar&role=teacher'), 'https://script.google.com/macros/s/X/exec?foo=bar', '다른 쿼리는 남긴다');
+  same(c.cleanWebAppUrl('https://a.b/exec?K=1&%6B=2&Role=teacher'), 'https://a.b/exec', '대소문자·인코딩된 이름');
+  same(c.cleanWebAppUrl(' https://a.b/exec \n'), 'https://a.b/exec', '앞뒤 공백');
+  same(c.cleanWebAppUrl('   '), '', '빈 주소');
+  same(c.cleanWebAppUrl('https://a.b/exec'), 'https://a.b/exec', '깨끗한 주소는 그대로');
+});
+check('1-2 buildUrl: 저장값에 k가 남아 있어도 요청에 싣지 않는다', () => {
+  const c = sandbox(['normalizeWebAppUrl', 'buildUrl'], { optional: ['cleanWebAppUrl'] });
+  const u = c.buildUrl('https://script.google.com/macros/s/X/exec?role=teacher&k=S3CRET#h', { api: 'calls', grade: '3', classNum: '2' });
+  ok(u.indexOf('S3CRET') < 0 && !/[?&]k=/.test(u), 'k가 실렸다: ' + u);
+  ok(!/role=/.test(u) && u.indexOf('#') < 0, 'role·해시가 남았다: ' + u);
+  ok(/api=calls/.test(u) && /grade=3/.test(u), 'api 파라미터가 빠졌다: ' + u);
+});
+check('1-3 Java 서비스: 요청 주소를 만들 때 role·k를 떼는 도우미를 쓴다 (글자 검사)', () => {
+  ok(/static String stripTeacherParams\(String /.test(JSRC), 'stripTeacherParams 도우미가 없다');
+  ok(/stripTeacherParams\(cfg\.optString\("webAppUrl"/.test(JSRC), '설정 주소에 도우미를 거치지 않는다');
+});
+
+/* ===== 2. 학년·반 정규화 ===== */
+check('2-1 normalizeClassNo: 전각·«학년»·«반»·공백을 다듬고 1~2자리 숫자만 받는다', () => {
+  const c = sandbox(['normalizeClassNo']);
+  const cases = [['３', '3'], ['3학년', '3'], ['2반', '2'], [' 03 ', '3'], ['０２반', '2'], ['3 학년', '3'], ['12', '12'], [3, '3'],
+    ['a', ''], ['3-2', ''], ['', ''], ['123', ''], ['0', ''], ['삼', ''], [null, '']];
+  cases.forEach(([inp, want]) => same(c.normalizeClassNo(inp), want, '입력 ' + JSON.stringify(inp)));
+});
+check('2-2 시작 시 옛 저장값 정리: k 주소·«3학년»을 고쳐 localStorage와 네이티브 저장소에 다시 쓴다', async () => {
+  const sets = [];
+  let nativeVal = null;
+  const P = { set: o => { sets.push(o); nativeVal = o.value; return Promise.resolve(); }, get: () => Promise.resolve({ value: nativeVal }) };
+  const stored = { webAppUrl: 'https://script.google.com/macros/s/X/exec?role=teacher&k=S3CRET', grade: '3학년', classNum: '２반', mode: 'standby', volume: 7 };
+  const c = sandbox(['loadSettings', 'saveSettingsLocal', 'normalizeWebAppUrl', 'cleanWebAppUrl', 'normalizeClassNo', 'repairStoredSettings', 'isConfigured'], {
+    vars: ['STORE_KEY', 'DEFAULTS'], optional: ['syncNativeSettings'],
+    globals: { window: { Capacitor: { Plugins: { Preferences: P } } } },
+    storage: { yc_settings: JSON.stringify(stored) },
+    after: FLAVOR === 'compat' ? 'var _nativeSyncState = { ok: null, why: "" };' : ''
+  });
+  c.SETTINGS = c.repairStoredSettings(c.loadSettings());
+  await flush(); await flush();
+  const saved = JSON.parse(c.localStorage.getItem('yc_settings'));
+  same([saved.webAppUrl, saved.grade, saved.classNum, saved.volume], ['https://script.google.com/macros/s/X/exec', '3', '2', 7], 'localStorage 정리');
+  ok(sets.length >= 1, '네이티브 저장소(Preferences.set)에 다시 쓰지 않았다');
+  const last = JSON.parse(sets[sets.length - 1].value);
+  ok(last.webAppUrl.indexOf('S3CRET') < 0 && last.grade === '3', '네이티브 저장소에 정리 전 값: ' + sets[sets.length - 1].value);
+  ok(c.isConfigured(), '정리한 설정이 «설정됨»이 아니다');
+});
+check('2-3 고칠 수 없는 학년·반(«a»)은 지우지 않고 미설정으로 본다', () => {
+  const P = { set: () => Promise.resolve(), get: () => Promise.resolve({ value: 'x' }) };
+  const stored = { webAppUrl: 'https://a.b/exec', grade: 'a', classNum: '2' };
+  const c = sandbox(['loadSettings', 'saveSettingsLocal', 'normalizeWebAppUrl', 'cleanWebAppUrl', 'normalizeClassNo', 'repairStoredSettings', 'isConfigured'], {
+    vars: ['STORE_KEY', 'DEFAULTS'], optional: ['syncNativeSettings'],
+    globals: { window: { Capacitor: { Plugins: { Preferences: P } } } },
+    storage: { yc_settings: JSON.stringify(stored) },
+    after: FLAVOR === 'compat' ? 'var _nativeSyncState = { ok: null, why: "" };' : ''
+  });
+  c.SETTINGS = c.repairStoredSettings(c.loadSettings());
+  ok(!c.isConfigured(), '«a»인데 설정됨으로 본다');
+  same(JSON.parse(c.localStorage.getItem('yc_settings')).grade, 'a', '저장값을 지웠다');
+});
+
+/* ===== 3. 호출 확인(confirm) ===== */
+function apiBox() {
+  const calls = [];
+  const c = sandbox([], { vars: ['api'], after: '' });
+  c.callApi = (u, name, params, ms) => { calls.push({ name, params, ms }); return Promise.resolve({ ok: true, data: [] }); };
+  return { c, calls };
+}
+check('3-1 api.confirmCall: row와 함께 grade·classNum을 보낸다 / TTS만 15초 제한', () => {
+  const { c, calls } = apiBox();
+  c.api.confirmCall('https://a.b/exec', 7, '3', '2');
+  same(calls[0].name, 'confirm', 'confirm 호출');
+  same([calls[0].params.row, calls[0].params.grade, calls[0].params.classNum], [7, '3', '2'], 'confirm 파라미터');
+  c.api.getTts('https://a.b/exec', '홍길동 학생');
+  same([calls[1].name, calls[1].ms], ['tts', 15000], 'TTS 제한 시간');
+  c.api.getCalls('https://a.b/exec', '3', '2');
+  ok(calls[2].ms === undefined, '호출 목록은 기본 8초 그대로여야 한다');
+});
+function retryBox(responses) {
+  const waits = [], sent = [];
+  const c = sandbox(['confirmWithRetry'], { vars: ['CONFIRM_RETRY_MS'] });
+  c.wait = ms => { waits.push(ms); return Promise.resolve(); };
+  c.api = { confirmCall: (u, row, g, cn) => { sent.push([row, g, cn]); return Promise.resolve(responses[Math.min(sent.length - 1, responses.length - 1)]); } };
+  return { c, waits, sent };
+}
+check('3-2 확인 재시도: 통신 실패면 2초·5초 뒤 다시 보내 성공하면 멈춘다', async () => {
+  const { c, waits, sent } = retryBox([{ ok: false, error: '시간 초과' }, { ok: false, error: '시간 초과' }, { ok: true, data: { ok: true } }]);
+  const r = await c.confirmWithRetry('https://a.b/exec', 9, '3', '2');
+  same(sent.length, 3, '보낸 횟수'); same(waits, [2000, 5000], '기다린 시간'); same(r.ok, true, '결과');
+  same(sent[0], [9, '3', '2'], '재시도에도 반 정보');
+});
+check('3-3 확인 재시도: 계속 실패하면 최대 3번(2·5·10초)까지만', async () => {
+  const { c, waits, sent } = retryBox([{ ok: false, error: '끊김' }]);
+  const r = await c.confirmWithRetry('https://a.b/exec', 9, '3', '2');
+  same(sent.length, 4, '첫 시도 + 재시도 3번'); same(waits, [2000, 5000, 10000], '기다린 시간'); same(r.ok, false, '결과');
+});
+check('3-4 확인 재시도: 서버가 ok:false(다른 반 등)를 주면 다시 보내지 않는다', async () => {
+  const { c, waits, sent } = retryBox([{ ok: true, data: { ok: false, msg: '다른 반 호출입니다' } }]);
+  await c.confirmWithRetry('https://a.b/exec', 9, '3', '2');
+  same(sent.length, 1, '보낸 횟수'); same(waits, [], '기다림 없음');
+});
+function tickBox(serverCalls) {
+  const log = { confirm: [], standby: 0, alert: [] };
+  const c = sandbox(['tick', 'isConfigured'], { optional: ['normalizeClassNo', 'confirmWithRetry'], after: 'var current = null, alertedRows = {}, autoDismissSec = 30;' });
+  vm.runInContext('var CONFIRM_RETRY_MS = [2000, 5000, 10000];', c);
+  c.__NOW = new Date(2026, 8, 15, 10, 23).getTime();
+  c.SETTINGS = { webAppUrl: 'https://a.b/exec', grade: '3', classNum: '2', mode: 'standby', showStandby: true };
+  c.wait = () => Promise.resolve();
+  c.api = {
+    getCalls: () => Promise.resolve({ ok: true, data: serverCalls }),
+    confirmCall: function () { log.confirm.push([].slice.call(arguments)); return Promise.resolve({ ok: true, data: { ok: true } }); }
+  };
+  c.showStandby = () => { log.standby++; };
+  c.showAlert = p => { log.alert.push(p.call.row); };
+  return { c, log };
+}
+check('3-5 화면 고착: 마감된 호출이 서버 목록에 남아 있어도 대기화면으로 돌아간다', async () => {
+  const { c, log } = tickBox([{ row: 5, num: 12, name: '홍길동' }]);
+  vm.runInContext('alertedRows[5] = true; current = { row: 5, num: 12, name: "홍길동", deadlineAt: __NOW - 1, totalSec: 30 };', c);
+  await c.tick(); await flush();
+  ok(vm.runInContext('current', c) === null, '마감된 호출이 current에 남았다');
+  same(log.confirm.length >= 1 ? log.confirm[0].slice(1) : null, [5, '3', '2'], '확인에 행·학년·반');
+  same(log.standby, 1, '대기화면 복귀 횟수');
+  same(log.alert, [], '이미 알린 호출을 다시 띄웠다');
+});
+check('3-6 새 호출은 띄우고, 목록이 비면 대기화면 (기존 동작 유지)', async () => {
+  const a = tickBox([{ row: 8, num: 3, name: '김철수' }]);
+  await a.c.tick();
+  same(a.log.alert, [8], '새 호출 표시');
+  const b = tickBox([]);
+  await b.c.tick();
+  same(b.log.standby, 1, '빈 목록이면 대기화면');
+});
+check('3-7 Java 서비스: 폴링이 겹치지 않게 한 번에 하나만 돈다 (글자 검사)', () => {
+  ok(/private volatile boolean polling/.test(JSRC), 'volatile polling 표식이 없다');
+  ok(/if \(!polling\) \{\s*polling = true;/.test(JSRC), '겹침 방지 분기가 없다');
+  ok(/finally \{ polling = false; \}/.test(JSRC), '끝나면 polling을 풀지 않는다');
+});
+
+/* ===== 4. 교체 표시 + 이스케이프 ===== */
+check('4-1 오늘 줄: 바뀐 교시에 chg·«교체»·«원래 과목», 같은 과목이면 원래 줄 생략', () => {
+  const c = renderBox();
+  const list = todayList(7);
+  list[2] = { period: 3, subject: '체육', changed: true, orig: '과학', teacher: '박교사', origTeacher: '김교사' };
+  list[4] = { period: 5, subject: '사회', changed: true, orig: '사회' };
+  c.renderPeriodRow(list);
+  const row = c.__doc.reg.periodRow;
+  const p3 = row.children.find(e => e.id === 'p-3'), p5 = row.children.find(e => e.id === 'p-5'), p1 = row.children.find(e => e.id === 'p-1');
+  ok(p3 && /\bchg\b/.test(p3.className), '3교시 chg 클래스: ' + (p3 && p3.className));
+  ok(/<span class="chg-tag">교체<\/span>/.test(p3.innerHTML), '«교체» 태그: ' + p3.innerHTML);
+  ok(/<div class="po">원래 과학<\/div>/.test(p3.innerHTML), '«원래 과목» 줄: ' + p3.innerHTML);
+  ok(/\bchg\b/.test(p5.className) && p5.innerHTML.indexOf('class="po"') < 0, '과목이 같으면 원래 줄 생략: ' + p5.innerHTML);
+  ok(!/\bchg\b/.test(p1.className) && p1.innerHTML.indexOf('교체') < 0, '안 바뀐 교시에 표시가 붙었다');
+});
+check('4-2 오늘 줄: 과목명·원래 과목을 HTML 이스케이프한다', () => {
+  const c = renderBox();
+  c.renderPeriodRow([{ period: 1, subject: '<img src=x onerror=alert(1)>', changed: true, orig: '국어&"수학"<b>' }]);
+  const h = c.__doc.reg.periodRow.innerHTML;
+  ok(h.indexOf('<img') < 0 && h.indexOf('&lt;img src=x onerror=alert(1)&gt;') >= 0, '과목명: ' + h);
+  ok(h.indexOf('<b>') < 0 && h.indexOf('국어&amp;&quot;수학&quot;&lt;b&gt;') >= 0, '원래 과목: ' + h);
+});
+check('4-3 오늘 줄: 같은 교시가 여러 줄이면 «과목이 있는 첫 줄»', () => {
+  const c = renderBox();
+  c.renderPeriodRow([{ period: 1, subject: '국어' }, { period: 1, subject: '수학' }, { period: 2, subject: '' }, { period: 2, subject: '과학' }]);
+  const row = c.__doc.reg.periodRow;
+  const ps = id => (row.children.find(e => e.id === id).innerHTML.match(/<div class="ps">(.*?)<\/div>/) || [])[1];
+  same([ps('p-1'), ps('p-2')], ['국어', '과학'], '1·2교시 과목');
+});
+check('4-4 오늘 줄: 다시 그려도 칸이 쌓이지 않는다(innerHTML 비움)', () => {
+  const c = renderBox();
+  c.renderPeriodRow(todayList(7));
+  const n1 = c.__doc.reg.periodRow.children.length;
+  c.renderPeriodRow(todayList(7));
+  same(c.__doc.reg.periodRow.children.length, n1, '칸 수');
+  same(n1, 8, '7교시 + 점심');
+});
+check('4-5 주간표: 교체 칸 chg + title(원래 과목, 이스케이프) + 범례', () => {
+  const c = renderBox();
+  const w = subjWeek(7);
+  w['20260915'][2] = { period: 3, subject: '체육', changed: true, orig: '<과학>' };
+  w['20260917'][0] = { period: 1, subject: '미술', changed: true, orig: '국어' };
+  c.renderWeek(w);
+  const h = c.__doc.reg.weekWrap.innerHTML;
+  same((h.match(/<td class="[^"]*\bchg\b[^"]*"/g) || []).length, 2, '교체 칸 수');
+  ok(h.indexOf('<td class="today-col chg" title="원래 &lt;과학&gt;">체육</td>') >= 0, '오늘 교체 칸: ' + h);
+  ok(h.indexOf('title="원래 국어"') >= 0, '목요일 교체 칸 title');
+  ok(/^<div class="week-legend"><span class="sw"><\/span>이번 주 교체 수업<\/div><table/.test(h), '범례가 표 위에 없다');
+  c.renderWeek(subjWeek(7));
+  ok(c.__doc.reg.weekWrap.innerHTML.indexOf('week-legend') < 0, '교체가 없는데 범례가 남았다');
+});
+check('4-6 주간표: 과목 이스케이프 + 같은 교시 여러 줄이면 «과목이 있는 첫 줄»', () => {
+  const c = renderBox();
+  const w = subjWeek(7);
+  w['20260914'] = [{ period: 1, subject: '' }, { period: 1, subject: '국어' }, { period: 2, subject: '<script>' }, { period: 2, subject: '영어' }];
+  c.renderWeek(w);
+  const h = c.__doc.reg.weekWrap.innerHTML;
+  const firstRow = h.match(/<td class="pnum">1<\/td><td>(.*?)<\/td>/);
+  same(firstRow && firstRow[1], '국어', '월 1교시');
+  ok(h.indexOf('<script>') < 0 && h.indexOf('<td>&lt;script&gt;</td>') >= 0, '월 2교시 이스케이프: ' + h.slice(0, 400));
+});
+check('4-7 급식: 반찬 이름을 이스케이프한다', () => {
+  const c = sandbox(['renderMeal']);
+  c.renderMeal([{ type: '중식', kcal: '700', dishes: ['<b>제육</b>', '김치&깍두기'], allergy: [] }]);
+  const slot = c.__doc.reg.mealList.children[0];
+  const mm = slot.children.find(e => e.className === 'mm');
+  same(mm.innerHTML, '&lt;b&gt;제육&lt;/b&gt;<br>김치&amp;깍두기', '반찬 줄');
+});
+check('4-8 style.css: 웹 칠판의 교체 표시 규칙이 옮겨져 있다 (글자 검사)', () => {
+  const css = fs.readFileSync(path.join(path.dirname(APP), '..', 'style.css'), 'utf8');
+  ['.period.chg {', '.period.chg.now {', '.period .chg-tag {', '.period .po {', '.period.now .po {', 'table.week td.chg {', '.week-legend {', '.week-legend .sw {']
+    .forEach(sel => ok(css.indexOf(sel) >= 0, 'CSS 규칙 없음: ' + sel));
+});
+
+/* ===== 5. 지금 무슨 시간인지 ===== */
+const at = (h, m) => h * 60 + m;
+check('5-1 주말이면 «주말»', () => {
+  const c = renderBox();
+  c.renderPeriodRow(todayList(7)); c.renderWeek(subjWeek(7));
+  const sat = new Date(2026, 8, 19, 10, 0);
+  same(c.currentPeriodStatus(at(10, 0), sat).label, '주말', '토요일 10시(날짜 전달)');
+  c.__NOW = sat.getTime();
+  same(c.currentPeriodStatus(at(10, 0)).label, '주말', '토요일 10시(날짜 생략)');
+});
+check('5-2 이번 주는 있는데 오늘만 비었으면 «오늘은 수업이 없어요»', () => {
+  const c = renderBox();
+  const w = subjWeek(7); w['20260915'] = [];
+  c.renderWeek(w); c.renderPeriodRow([]);
+  same(c.currentPeriodStatus(at(10, 0), new Date(2026, 8, 15, 10, 0)).label, '오늘은 수업이 없어요', '재량휴업일');
+});
+check('5-2b 오늘 조회만 실패(빈 목록)해도 주간표에 오늘 과목이 있으면 수업 있는 날(서버 검수 2026-09-11)', () => {
+  const c = renderBox();
+  c.renderWeek(subjWeek(6)); c.renderPeriodRow([]);
+  same(c.currentPeriodStatus(at(10, 0), new Date(2026, 8, 15, 10, 0)).label, '2교시 수업중', '나이스 오류로 오늘만 빈 목록');
+  same(c.currentPeriodStatus(at(15, 12), new Date(2026, 8, 15, 15, 12)).label, '방과후', '마지막 교시는 주간표의 오늘(6교시)');
+});
+check('5-3 나이스 미연결(이번 주가 통째로 빔)이면 «수업 없음» 판정을 하지 않는다', () => {
+  const c = renderBox();
+  c.renderWeek({}); c.renderPeriodRow([]);
+  same(c.currentPeriodStatus(at(10, 0), new Date(2026, 8, 15, 10, 0)).label, '2교시 수업중', '빈 주');
+  const c2 = renderBox();
+  c2.renderWeek({ '20260914': [], '20260915': [] }); c2.renderPeriodRow([]);
+  same(c2.currentPeriodStatus(at(10, 0), new Date(2026, 8, 15, 10, 0)).label, '2교시 수업중', '날짜 칸만 있고 과목이 없는 주');
+});
+check('5-4 오늘 시간표의 마지막 교시까지만 (6교시 날 15:10은 방과후)', () => {
+  const c = renderBox();
+  c.renderWeek(subjWeek(7)); c.renderPeriodRow(todayList(6));
+  const tue = new Date(2026, 8, 15, 15, 10);
+  same(c.currentPeriodStatus(at(14, 10), tue).label, '6교시 수업중', '14:10');
+  same(c.currentPeriodStatus(at(15, 10), tue).label, '방과후', '15:10');
+  same(c.__doc.reg.periodRow.children.length, 7, '오늘 줄도 6교시 + 점심');
+});
+check('5-5 통신 실패(null)는 «받았는데 빔»([])과 구분한다', () => {
+  const c = renderBox();
+  c.renderWeek(subjWeek(7)); c.renderPeriodRow(null);
+  same(c.currentPeriodStatus(at(10, 0), new Date(2026, 8, 15, 10, 0)).label, '2교시 수업중', '못 받은 날을 수업 없음으로 보지 않는다');
+  ok(c.__doc.reg.periodRow.innerHTML.indexOf('불러오지 못했') >= 0, '못 받음 안내: ' + c.__doc.reg.periodRow.innerHTML);
+});
+check('5-6 refreshMeal: 한 번도 못 받은 시간표는 null로, 받은 뒤 실패하면 직전값 유지(last-good)', async () => {
+  const seen = [];
+  let fail = true;
+  const c = sandbox(['refreshMeal', 'isConfigured'], { vars: ['POLL_MS', 'pollTimer', 'lastMeal'], optional: ['normalizeClassNo'] });
+  c.SETTINGS = { webAppUrl: 'https://a.b/exec', grade: '3', classNum: '2' };
+  c.setTimeout = () => 1; c.clearTimeout = () => {};
+  const T = todayList(7), W = subjWeek(7);
+  c.api = {
+    getMeal: () => Promise.resolve(fail ? { ok: false } : { ok: true, data: [] }),
+    getTimetable: (u, g, cn, scope) => Promise.resolve(fail ? { ok: false, error: '끊김' } : { ok: true, data: scope === 'week' ? W : T })
+  };
+  c.onBoardData = d => seen.push(d);
+  await c.refreshMeal();
+  same([seen[0].todayTimetable, seen[0].weekTimetable], [null, null], '처음 실패');
+  fail = false; await c.refreshMeal();
+  same(seen[1].todayTimetable.length, 7, '성공');
+  fail = true; await c.refreshMeal();
+  same(seen[2].todayTimetable.length, 7, '다시 실패해도 직전값');
+});
+
+/* ===== 6. periodConfig ===== */
+const DEF = { start: '08:50', periodLen: 45, breakLen: 10, lunchAfter: 4, lunchLen: 50, maxPeriod: 7 };
+check('6-1 validPeriodConfig: 모양이 맞는 시정만 받는다', () => {
+  const c = renderBox();
+  same(c.validPeriodConfig(DEF), DEF, '기본 시정');
+  same(c.validPeriodConfig(Object.assign({}, DEF, { start: '8:50' })).start, '08:50', 'H:MM도 받아 HH:MM으로');
+  same(c.validPeriodConfig(Object.assign({}, DEF, { lunchAfter: 0 })).lunchAfter, 0, '점심 없음(0)');
+  same(c.validPeriodConfig(Object.assign({}, DEF, { maxPeriod: '6' })).maxPeriod, 6, '숫자 글자');
+  [null, 'x', {}, Object.assign({}, DEF, { start: '8시' }), Object.assign({}, DEF, { start: '25:00' }), Object.assign({}, DEF, { maxPeriod: 0 }),
+    Object.assign({}, DEF, { maxPeriod: 11 }), Object.assign({}, DEF, { maxPeriod: 'abc' }), Object.assign({}, DEF, { periodLen: '' }),
+    Object.assign({}, DEF, { breakLen: -1 }), Object.assign({}, DEF, { lunchLen: 2.5 })]
+    .forEach((bad, i) => same(c.validPeriodConfig(bad), null, '틀린 시정 #' + i + ' ' + JSON.stringify(bad)));
+});
+check('6-2 applyPeriodConfig: 바뀌면 시정 재계산 + 오늘·주간표 다시 그림 + yc_period_config 저장', () => {
+  const c = renderBox();
+  c.renderPeriodRow(todayList(7)); c.renderWeek(subjWeek(7));
+  same(c.__doc.reg.periodRow.children.length, 8, '처음 7교시 + 점심');
+  c.applyPeriodConfig(Object.assign({}, DEF, { maxPeriod: 6 }));
+  same(c.SCHEDULE.filter(s => s.type === 'period').length, 6, 'SCHEDULE 재계산');
+  same(c.__doc.reg.periodRow.children.length, 7, '오늘 줄 다시 그림');
+  same((c.__doc.reg.weekWrap.innerHTML.match(/<td class="pnum">/g) || []).length, 6, '주간표 다시 그림');
+  same(JSON.parse(c.localStorage.getItem('yc_period_config')).maxPeriod, 6, '마지막 정상값 저장');
+  c.applyPeriodConfig({ start: 'abc', maxPeriod: 3 });
+  same(c.PERIOD_CONFIG.maxPeriod, 6, '틀린 시정은 무시');
+  same(JSON.parse(c.localStorage.getItem('yc_period_config')).maxPeriod, 6, '틀린 시정을 저장하지 않는다');
+});
+check('6-3 시작 시 저장해 둔 시정을 먼저 읽는다', () => {
+  const stored = Object.assign({}, DEF, { start: '09:00', maxPeriod: 6 });
+  const c = sandbox(['loadStoredPeriodConfig', 'validPeriodConfig'], { vars: ['PERIOD_CONFIG'], storage: { yc_period_config: JSON.stringify(stored) } });
+  c.loadStoredPeriodConfig();
+  same([c.PERIOD_CONFIG.start, c.PERIOD_CONFIG.maxPeriod], ['09:00', 6], '저장값 반영');
+  const c2 = sandbox(['loadStoredPeriodConfig', 'validPeriodConfig'], { vars: ['PERIOD_CONFIG'], storage: { yc_period_config: '{깨짐' } });
+  c2.loadStoredPeriodConfig();
+  same(c2.PERIOD_CONFIG, DEF, '깨진 저장값이면 기본 시정');
+});
+check('6-4 onBoardData: 받은 periodConfig를 applyPeriodConfig로 넘긴다', () => {
+  ok(/function onBoardData[\s\S]*?applyPeriodConfig\(data\.board\.periodConfig\)/.test(SRC), 'onBoardData가 applyPeriodConfig를 쓰지 않는다');
+  ok(!/PERIOD_CONFIG = data\.board\.periodConfig/.test(SRC), '형태 검사 없이 그대로 넣는 줄이 남았다');
+});
+check('6-5 startPolling: board(시정)를 받은 뒤에 급식·시간표를 부른다 / board가 터져도 폴링은 시작', async () => {
+  const order = [];
+  let resolveBoard, rejectBoard;
+  const c = sandbox(['startPolling'], { vars: ['POLL_MS', 'pollTimer'] });
+  c.setInterval = () => 1; c.clearInterval = () => {};
+  c.refreshMeal = () => { order.push('meal'); };
+  c.tick = () => { order.push('tick'); };
+  c.refreshBoard = () => { order.push('board'); return new Promise((res, rej) => { resolveBoard = res; rejectBoard = rej; }); };
+  c.startPolling();
+  same(order, ['board'], 'board 응답 전');
+  resolveBoard(); await flush();
+  ok(order.indexOf('meal') > 0 && order.indexOf('tick') > 0, 'board 뒤에 meal·tick: ' + order.join(','));
+  order.length = 0;
+  c.startPolling(); rejectBoard(new Error('터짐')); await flush();
+  ok(order.indexOf('meal') >= 0 && order.indexOf('tick') >= 0, 'board가 터지면 폴링이 멈춘다: ' + order.join(','));
+});
+
+/* ===== 7·8. 기타 ===== */
+if (FLAVOR === 'android') {
+  check('8-1 build-release.sh 표식이 이번 app.js에 들어 있다(아무것도 안 재는 표식 방지)', () => {
+    const sh = fs.readFileSync(path.join(ROOT, 'build-release.sh'), 'utf8');
+    const m = sh.match(/MARKER="\$\{YC_MARKER:-([^}]*)\}"/);
+    ok(m, 'MARKER 줄을 못 찾음');
+    ok(m[1] === 'function cleanWebAppUrl', '표식이 이번 수정 문자열이 아니다: ' + m[1]);
+    ok(SRC.indexOf(m[1]) >= 0, 'app.js에 표식 없음: ' + m[1]);
+  });
+}
+if (FLAVOR === 'compat') {
+  check('C-1 호환판 전용 코드가 살아 있다(기본판 www로 덮어쓰기 방지)', () => {
+    ['syncNativeSettings', 'showLastPollBadge', 'showSourceReport', 'showNativeSyncWarning'].forEach(n => ok(has(n), '호환판 전용 함수가 사라짐: ' + n));
+    ok(/syncNativeSettings\(JSON\.stringify\(SETTINGS\)/.test(SRC), '켤 때 네이티브 저장소 재동기화가 사라짐');
+    ['loadAlerted', 'saveAlerted', 'SourceSwitcher.tryReturnToAndroid'].forEach(n => ok(JSRC.indexOf(n) >= 0, 'Java 전용 코드가 사라짐: ' + n));
+  });
+  check('C-2 README가 «www는 기본판과 동일»이라고 하지 않는다', () => {
+    const md = fs.readFileSync(path.join(ROOT, 'README.md'), 'utf8');
+    ok(md.indexOf('기본판과 **내용이 동일**') < 0, 'README 171행 문구가 그대로다');
+  });
+}
+
+/* ---------- 실행 ---------- */
+(async () => {
+  let pass = 0, fail = 0;
+  console.log('[' + FLAVOR + '] ' + APP);
+  for (const t of results) {
+    try { await t.body(); pass++; console.log('  통과  ' + t.name); }
+    catch (e) { fail++; console.log('  실패  ' + t.name + '\n      ' + String(e && e.message || e).split('\n').join('\n      ')); }
+  }
+  console.log('\n결과: 통과 ' + pass + ' / 실패 ' + fail + ' (전체 ' + results.length + ')');
+  process.exit(fail ? 1 : 0);
+})();

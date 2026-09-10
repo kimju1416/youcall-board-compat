@@ -104,6 +104,13 @@ body { font-family: 'Noto Sans KR', 'Malgun Gothic', sans-serif; color: var(--te
 .period.now { background: var(--blue); box-shadow: 2px 2px 8px var(--blue-d); }
 .period.lunch { background: var(--yellow); }
 .period.lunch.now { box-shadow: 2px 2px 8px var(--yellow-d); }
+/* 컴시간 교체 수업(서버 v4.24) — 색만으로 구분하지 않고 «교체» 글자와 «원래 과목»을 함께 보인다(웹 칠판과 같은 규칙).
+   글자 크기는 이 파일의 고정 px 체계에 맞췄다(웹 칠판은 clamp). */
+.period.chg { box-shadow: inset 0 0 0 3px var(--yellow-d); }
+.period.chg.now { box-shadow: inset 0 0 0 3px #fff, 2px 2px 8px var(--blue-d); }
+.period .chg-tag { display: inline-block; font-size: .9em; font-weight: 900; color: var(--yellow-ink); background: var(--yellow); border-radius: 8px; padding: 1px 7px; margin-left: 4px; }
+.period .po { font-size: 12px; font-weight: 700; color: var(--text2); margin-top: -4px; }
+.period.now .po { color: rgba(255,255,255,.85); }
 .period .pn { font-size: 13px; font-weight: 700; color: var(--text2); }
 .period.now .pn { color: rgba(255,255,255,.85); }
 .period.lunch .pn { color: var(--yellow-ink); }
@@ -163,6 +170,12 @@ table.week th { font-weight: 700; color: var(--text2); padding: calc(7px * var(-
 table.week th.today { color: var(--blue-d); }
 table.week td { text-align: center; padding: calc(6px * var(--ws)) 4px; border-top: 1px solid var(--border); font-weight: 500; }
 table.week td.today-col { background: #eaf5ff; font-weight: 700; border-radius: 8px; }
+/* 교체 칸 — 오늘 열(today-col)과 겹쳐도 교체 색이 이기도록 오늘 열 규칙 뒤에 둔다 */
+table.week td.chg { background: #fff1c9; color: var(--yellow-ink); font-weight: 900; border-radius: 8px; box-shadow: inset 0 0 0 2px var(--yellow-d); }
+.week-legend { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; color: var(--yellow-ink); margin-bottom: 4px; flex-shrink: 0; }
+.week-legend .sw { width: 1.1em; height: 1.1em; border-radius: 4px; background: #fff1c9; box-shadow: inset 0 0 0 2px var(--yellow-d); flex-shrink: 0; }
+/* flex gap을 모르는 낡은 WebView(no-flex-gap)에서는 색 견본과 글자가 붙는다 — 여백을 margin으로 되살린다 */
+.no-flex-gap .week-legend .sw { margin-right: 6px; }
 table.week td.pnum { color: var(--text2); font-size: 13px; font-size: calc(clamp(10px,0.67vw,16px) * var(--ws)); width: 32px; }
 .week-empty { font-size: 13px; font-size: clamp(11px,0.7vw,17px); color: var(--text2); }
 

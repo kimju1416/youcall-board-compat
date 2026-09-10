@@ -53,6 +53,33 @@ function saveSettingsLocal(patch) {
   return next;
 }
 
+/* 학년·반 — 서버(v4.24)는 숫자만 받는다. «3학년»을 그대로 보내면 board 연결 확인은 통과하는데
+   호출 목록(calls)이 조용히 빈 배열로 와서 호출이 영영 안 뜬다.
+   전각 숫자(３)는 반각으로, «학년»·«반»·공백은 떼고, 1~2자리 숫자만 «03»→«3»으로 맞춘다. 아니면 ''(0도 없는 반). */
+function normalizeClassNo(v) {
+  var raw = String(v == null ? '' : v), s = '';
+  // 전각 숫자(U+FF10~FF19)는 글자 코드로 바꾼다 — 소스에 전각 글자를 직접 적으면 편집 도구가 글자를 바꿔 치는 사고가 있었다.
+  for (var i = 0; i < raw.length; i++) {
+    var code = raw.charCodeAt(i);
+    s += (code >= 0xFF10 && code <= 0xFF19) ? String.fromCharCode(code - 0xFF10 + 48) : raw.charAt(i);
+  }
+  s = s.replace(/학년|반/g, '').replace(/\s+/g, '');
+  if (!/^\d{1,2}$/.test(s) || Number(s) === 0) return '';
+  return String(Number(s));
+}
+/* 켤 때 저장값을 한 번 다듬는다 — 옛 판이 남긴 교사 열쇠(k) 붙은 주소, «3학년» 같은 학년·반.
+   고칠 수 있으면 고쳐서 다시 저장한다(saveSettingsLocal이라 상주 서비스가 읽는 네이티브 저장소에도 같이 들어간다).
+   고칠 수 없는 학년·반은 지우지 않고 둔다 — isConfigured()가 미설정으로 보고 설정 화면을 연다. */
+function repairStoredSettings(s) {
+  var patch = {}, changed = false;
+  var url = cleanWebAppUrl(s.webAppUrl);
+  if (url !== s.webAppUrl) { patch.webAppUrl = url; changed = true; }
+  var g = normalizeClassNo(s.grade), c = normalizeClassNo(s.classNum);
+  if (g && g !== s.grade) { patch.grade = g; changed = true; }
+  if (c && c !== s.classNum) { patch.classNum = c; changed = true; }
+  return changed ? saveSettingsLocal(patch) : s;
+}
+
 /* ===== GAS ?api= 호출 래퍼 (main/api.js 이식) ===== */
 // 전자칠판에서는 주소를 손으로 치다 https://를 빼먹는 일이 잦다.
 // 그대로 new URL()에 넣으면 TypeError가 나고, 그게 저장 핸들러를 통째로 죽여
@@ -64,9 +91,30 @@ function normalizeWebAppUrl(raw) {
   if (!/^https?:\/\//i.test(s)) s = 'https://' + s;
   return s;
 }
+// 교사용 주소는 ?role=teacher&k=<비밀키> 모양이다(v4.24). 칠판 설정에 그 주소를 붙여 넣으면
+// 교사 열쇠 k가 localStorage·네이티브 저장소에 평문으로 남고 매 요청마다 실려 나간다.
+// 그래서 다듬을 때 role·k 쿼리와 #해시를 떼어 낸다 — 저장할 때·켤 때·요청을 만들 때 모두 이 함수를 거친다.
+// new URL()을 쓰지 않는 이유: 주소가 조금만 어긋나도 예외가 나 저장 핸들러째 죽는다(위 주석과 같은 사고).
+function cleanWebAppUrl(raw) {
+  var s = normalizeWebAppUrl(raw);
+  if (!s) return '';
+  var hash = s.indexOf('#');
+  if (hash >= 0) s = s.slice(0, hash);
+  var q = s.indexOf('?');
+  if (q < 0) return s;
+  var kept = s.slice(q + 1).split('&').filter(function (pair) {
+    if (!pair) return false;
+    var name = pair.split('=')[0];
+    try { name = decodeURIComponent(name.replace(/\+/g, ' ')); } catch (e) { /* 깨진 %는 글자 그대로 본다 */ }
+    name = name.toLowerCase();
+    return name !== 'role' && name !== 'k';
+  });
+  return s.slice(0, q) + (kept.length ? '?' + kept.join('&') : '');
+}
 function buildUrl(base, params) {
-  var u = new URL(normalizeWebAppUrl(base));
+  var u = new URL(cleanWebAppUrl(base));
   u.searchParams.delete('role');              // ?role=teacher가 붙은 주소를 넣어도 학생 화면으로 동작하게
+  u.searchParams.delete('k');                 // 교사 열쇠는 어떤 경우에도 칠판 요청에 싣지 않는다(이중 방어)
   Object.keys(params || {}).forEach(function (k) {
     if (params[k] !== undefined && params[k] !== null && params[k] !== '') u.searchParams.set(k, params[k]);
   });
@@ -127,11 +175,13 @@ function callApi(webAppUrl, api, params, timeoutMs) {
 }
 var api = {
   getCalls: function (u, g, c) { return callApi(u, 'calls', { grade: g, classNum: c }); },
-  confirmCall: function (u, row) { return callApi(u, 'confirm', { row: row }); },
+  // 확인에는 학년·반을 함께 보낸다 — 서버(v4.24)가 «이 반의 호출인지» 본다(없으면 옛 앱으로 보고 반 검사를 건너뛴다).
+  confirmCall: function (u, row, g, c) { return callApi(u, 'confirm', { row: row, grade: g, classNum: c }); },
   getMeal: function (u) { return callApi(u, 'meal', {}); },
   getTimetable: function (u, g, c, scope) { return callApi(u, 'timetable', { grade: g, classNum: c, scope: scope }); },
   getBoard: function (u, g, c) { return callApi(u, 'board', { grade: g, classNum: c }); },
-  getTts: function (u, text) { return callApi(u, 'tts', { text: text }); }
+  // TTS는 서버가 음성 파일을 만들어 돌려주느라 다른 요청보다 오래 걸린다 — 이것만 15초까지 기다린다(나머지는 8초 그대로).
+  getTts: function (u, text) { return callApi(u, 'tts', { text: text }, 15000); }
 };
 
 /* ===== 호출 폴링 + 상태 머신 (main.js의 tick/refreshBoard/refreshMeal 이식) ===== */
@@ -143,9 +193,12 @@ var pollTimer = null, boardTimer = null, mealTimer = null, mealRetryTimer = null
 var alertedRows = {}, current = null, autoDismissSec = 30;
 
 // 급식/시간표 직전 성공값(last-good) — NEIS 일시 실패 시 빈값으로 덮지 않고 이 값을 유지한다.
-var lastMeal = [], lastToday = [], lastWeek = {};
+// 시간표는 처음에 null(아직 못 받음)이다 — []·{}로 두면 «받았는데 비었음»과 구분이 안 돼
+// 첫 요청이 실패한 날이 «오늘은 수업이 없어요»로 보인다.
+var lastMeal = [], lastToday = null, lastWeek = null;
 
-function isConfigured() { return !!(SETTINGS.webAppUrl && SETTINGS.grade && SETTINGS.classNum); }
+// 학년·반이 숫자 모양이 아니면(고칠 수 없는 옛 저장값) 설정 전으로 본다 — 그대로 돌면 호출이 조용히 안 온다.
+function isConfigured() { return !!(SETTINGS.webAppUrl && normalizeClassNo(SETTINGS.grade) && normalizeClassNo(SETTINGS.classNum)); }
 
 // (A) 공지/설정 — getBoard만. 자주(BOARD_REFRESH_MS) 돈다. 렌더러엔 board만 실어 보낸다(부분 업데이트).
 async function refreshBoard() {
@@ -169,20 +222,38 @@ async function refreshMeal() {
   ]);
   var meal = results[0], today = results[1], week = results[2];
   if (meal.ok) lastMeal = meal.data;   // 실패면 직전값 유지(빈값으로 덮지 않음)
-  if (today.ok) lastToday = today.data;
-  if (week.ok) lastWeek = week.data;
+  // 시간표는 모양까지 본다 — 오늘은 배열, 이번 주는 {날짜: [...]} 객체. 200 응답이라도 모양이 다르면
+  // 받은 것으로 치지 않는다(직전값 유지 + 재시도). 한 번도 못 받았으면 null이 그대로 가서 «못 받음»으로 그려진다.
+  var todayOk = today.ok && Array.isArray(today.data);
+  var weekOk = week.ok && !!week.data && typeof week.data === 'object' && !Array.isArray(week.data);
+  if (todayOk) lastToday = today.data;
+  if (weekOk) lastWeek = week.data;
   onBoardData({ meal: lastMeal, todayTimetable: lastToday, weekTimetable: lastWeek });
-  if (!meal.ok || !today.ok || !week.ok) {
+  if (!meal.ok || !todayOk || !weekOk) {
     if (mealRetryTimer) clearTimeout(mealRetryTimer);
     mealRetryTimer = setTimeout(refreshMeal, MEAL_RETRY_MS);
   }
+}
+
+/* 호출 확인(confirm). 통신이 실패해 서버에 안 닿으면 그 호출이 서버 목록에 계속 남는다.
+   통신 실패(callApi ok:false)일 때만 2초·5초·10초 뒤 최대 3번 다시 보낸다.
+   서버가 대답했으면(ok:true·already, 또는 ok:false «다른 반 호출입니다» 등) 다시 보내도 같은 답이라 멈춘다. */
+var CONFIRM_RETRY_MS = [2000, 5000, 10000];
+function confirmWithRetry(webAppUrl, row, grade, classNum, attempt) {
+  attempt = attempt || 0;
+  return api.confirmCall(webAppUrl, row, grade, classNum).then(function (res) {
+    if (res.ok || attempt >= CONFIRM_RETRY_MS.length) return res;
+    return wait(CONFIRM_RETRY_MS[attempt]).then(function () {
+      return confirmWithRetry(webAppUrl, row, grade, classNum, attempt + 1);
+    });
+  });
 }
 
 async function tick() {
   if (!isConfigured()) return;
   var s = SETTINGS;
   if (current && Date.now() >= current.deadlineAt) {
-    api.confirmCall(s.webAppUrl, current.row);
+    confirmWithRetry(s.webAppUrl, current.row, s.grade, s.classNum);   // 기다리지 않는다 — 폴링은 그대로 돈다
     current = null;
   }
   var res = await api.getCalls(s.webAppUrl, s.grade, s.classNum);
@@ -198,7 +269,10 @@ async function tick() {
       showAlert({ call: current, queueCount: queueCount });
       return;
     }
-    if (calls.length === 0) showStandby();
+    // 띄울 새 호출이 없으면 대기화면(상주형이면 다시 숨기)으로 돌아간다.
+    // 예전엔 «목록이 비었을 때만» 돌아갔다 — 확인이 서버에 안 닿아 이미 알린 호출이 목록에 남으면
+    // 새 호출도 아니고 목록도 안 비어, 0초가 된 호출 화면에 그대로 멈춰 있었다.
+    showStandby();
     return;
   }
   var qc = calls.filter(function (c) { return c.row !== current.row; }).length;
@@ -210,13 +284,18 @@ function startPolling() {
   if (boardTimer) clearInterval(boardTimer);
   if (mealTimer) clearInterval(mealTimer);
   if (mealRetryTimer) { clearTimeout(mealRetryTimer); mealRetryTimer = null; }
-  refreshMeal(); // 급식/시간표도 시작 즉시 1회 로드 — 설치 직후 30분 기다리지 않게
-  refreshBoard().then(function () { // autoDismissSec을 먼저 채워야 첫 알림부터 정확한 카운트다운
+  // 시정(periodConfig)이 board에 실려 오므로 board를 먼저 받고 급식/시간표를 그린다 —
+  // 거꾸로면 첫 시간표가 기본 시정(4교시 뒤 점심)으로 그려져 다음 갱신(최대 30분)까지 틀린 칸이 보였다.
+  // autoDismissSec도 board에서 채워야 첫 알림부터 정확한 카운트다운이 된다.
+  // board가 실패하거나 그리다 예외가 나도 폴링은 시작해야 한다 — then의 두 갈래에 같은 함수를 건다.
+  function afterBoard() {
+    refreshMeal(); // 급식/시간표도 시작 즉시 1회 로드 — 설치 직후 30분 기다리지 않게
     tick();
     pollTimer = setInterval(tick, POLL_MS);
     boardTimer = setInterval(refreshBoard, BOARD_REFRESH_MS);
     mealTimer = setInterval(refreshMeal, MEAL_REFRESH_MS);
-  });
+  }
+  refreshBoard().then(afterBoard, afterBoard);
 }
 
 /* ===== 오디오 (원본과 동일한 사운드 8종) ===== */
@@ -319,6 +398,8 @@ function applyPrefsToUI(s) {
 
 /* ===== 시정 계산 (원본과 동일) ===== */
 function toMinutes(hhmm) { var p = String(hhmm).split(':'); return parseInt(p[0]) * 60 + parseInt(p[1]); }
+// 과목명·원래 과목·반찬은 나이스·컴시간에서 온 글자다 — innerHTML에 넣기 전에 꺾쇠·앰퍼샌드·따옴표를 푼다(웹 칠판 escHtml과 같은 사본)
+function escHtml(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
 /* 점심은 그 교시가 끝나는 «즉시» 시작한다 — 쉬는시간을 따로 더하지 않는다.
    예전에는 쉬는시간을 먼저 더한 뒤 점심을 시작해 점심 이후 교시가 10분씩 늦게 표시됐다.
    ※ 웹(GAS index.html)·APK·호환판·EXE 네 곳에 같은 사본이 있다 — 반드시 같이 고친다. */
@@ -332,22 +413,94 @@ function buildSchedule(cfg) {
   }
   return slots;
 }
-function currentPeriodStatus(nowMin) {
-  for (var i = 0; i < SCHEDULE.length; i++) {
-    var s = SCHEDULE[i];
+/* 지금 무슨 시간인지 — 웹 칠판(GAS index.html) currentPeriodStatus와 같은 규칙.
+   · 주말 → «주말» (예전엔 토요일 10시에도 «2교시 수업중»)
+   · 이번 주 시간표는 있는데 오늘만 비었으면(공휴일·재량휴업) → «오늘은 수업이 없어요»
+     ⚠ 이번 주가 통째로 비었으면 판정하지 않는다 — 나이스·컴시간을 연결 안 한 학교는 늘 비어 있어서,
+       그걸 «수업 없음»으로 보면 그 학교 칠판이 매일 «수업 없음»이 된다
+     ⚠ 통신 실패로 오늘 시간표를 못 받았으면(null) 판정하지 않는다 — 못 받은 날을 쉬는 날로 보면 안 된다
+   · 오늘 시간표의 마지막 교시까지만 본다(수요일 6교시인 날 15시에 «7교시 수업중»이 뜨지 않게) */
+function currentPeriodStatus(nowMin, now) {
+  var d = now || new Date(), dow = d.getDay();
+  if (dow === 0 || dow === 6) return { label: '주말', period: null, lunch: false, off: true };
+  // 오늘 목록이 비었어도 이번 주 시간표에 오늘 과목이 있으면 수업 있는 날이다(나이스 오류는 «성공 + 빈 목록»으로 온다 — 서버 검수 2026-09-11)
+  if (_todayLoaded && _todayCount === 0 && _weekHasData && _weekTodayCount === 0) return { label: '오늘은 수업이 없어요', period: null, lunch: false, off: true };
+  var sch = effectiveSchedule();
+  for (var i = 0; i < sch.length; i++) {
+    var s = sch[i];
     if (nowMin >= s.start && nowMin < s.end) {
       return s.type === 'lunch' ? { label: '점심시간', period: null, lunch: true, off: false }
                                  : { label: s.period + '교시 수업중', period: s.period, lunch: false, off: false };
     }
   }
-  for (var i2 = 0; i2 < SCHEDULE.length - 1; i2++) {
-    if (nowMin >= SCHEDULE[i2].end && nowMin < SCHEDULE[i2 + 1].start) return { label: '쉬는시간', period: null, lunch: false, off: true };
+  for (var i2 = 0; i2 < sch.length - 1; i2++) {
+    if (nowMin >= sch[i2].end && nowMin < sch[i2 + 1].start) return { label: '쉬는시간', period: null, lunch: false, off: true };
   }
-  if (SCHEDULE.length && nowMin < SCHEDULE[0].start) return { label: '등교 전', period: null, lunch: false, off: true };
+  if (sch.length && nowMin < sch[0].start) return { label: '등교 전', period: null, lunch: false, off: true };
   return { label: '방과후', period: null, lunch: false, off: true };
 }
 
+// 오늘 시간표를 알면 그 마지막 교시까지만 — 요일마다 교시 수가 다르다. 모르면(시간표 연동 없음·못 받음) 시정 전체.
+function effectiveSchedule() {
+  var lastP = (_todayCount > 0) ? _todayLastPeriod : (_weekTodayCount > 0 ? _weekTodayLast : 0);
+  if (!lastP) return SCHEDULE;
+  return SCHEDULE.filter(function (s) {
+    if (s.type === 'period') return s.period <= lastP;
+    return (PERIOD_CONFIG.lunchAfter || 0) <= lastP;   // 점심은 «점심 시작교시»까지 수업이 있는 날만
+  });
+}
+
+/* 시정(periodConfig) — board 응답에 3분마다 실려 온다.
+   모양이 틀린 값(빈 칸·글자·범위 밖)으로 시정표를 만들면 시각이 NaN이 돼 «지금 몇 교시»와 오늘 줄이 통째로 틀어진다.
+   그래서 모양을 보고 맞는 것만 새 객체로 돌려준다(start는 HH:MM으로 맞춤). 틀리면 null. */
+var PERIOD_CONFIG_KEY = 'yc_period_config';
+function validPeriodConfig(cfg) {
+  if (!cfg || typeof cfg !== 'object') return null;
+  var m = /^(\d{1,2}):(\d{2})$/.exec(String(cfg.start == null ? '' : cfg.start).trim());
+  if (!m || Number(m[1]) > 23 || Number(m[2]) > 59) return null;
+  function wholeNum(v, lo, hi) {
+    if (typeof v === 'string' && /^\d{1,3}$/.test(v.trim())) v = Number(v.trim());
+    return (typeof v === 'number' && Math.floor(v) === v && v >= lo && v <= hi) ? v : null;
+  }
+  var out = {
+    start: (m[1].length === 1 ? '0' : '') + m[1] + ':' + m[2],
+    periodLen: wholeNum(cfg.periodLen, 1, 180),
+    breakLen: wholeNum(cfg.breakLen, 0, 120),
+    lunchAfter: wholeNum(cfg.lunchAfter, 0, 10),   // 0 = 점심 없음(서버 v4.24)
+    lunchLen: wholeNum(cfg.lunchLen, 0, 180),
+    maxPeriod: wholeNum(cfg.maxPeriod, 1, 10)
+  };
+  for (var k in out) { if (out[k] === null) return null; }
+  return out;
+}
+// 서버가 준 시정이 지금과 다르면 시정표를 다시 만들고 마지막으로 받은 오늘·주간 시간표를 다시 그린다.
+// 예전엔 값만 바꾸고 다시 그리지 않아, 교시 수·점심 위치가 바뀌어도 다음 급식/시간표 갱신(최대 30분)까지 옛 칸이 남았다.
+// 마지막 정상값은 저장해 두고 켤 때 먼저 읽는다(loadStoredPeriodConfig) — board가 늦거나 실패해도 기본 시정으로 그리지 않게.
+function applyPeriodConfig(raw) {
+  var cfg = validPeriodConfig(raw);
+  if (!cfg) return false;
+  if (JSON.stringify(cfg) === JSON.stringify(PERIOD_CONFIG)) return false;
+  PERIOD_CONFIG = cfg;
+  SCHEDULE = buildSchedule(PERIOD_CONFIG);
+  try { localStorage.setItem(PERIOD_CONFIG_KEY, JSON.stringify(cfg)); } catch (e) { /* 저장 못 해도 화면은 새 시정으로 */ }
+  if (_lastTodayList) renderPeriodRow(_lastTodayList);
+  if (_lastWeekMap) renderWeek(_lastWeekMap);
+  return true;
+}
+function loadStoredPeriodConfig() {
+  try {
+    var cfg = validPeriodConfig(JSON.parse(localStorage.getItem(PERIOD_CONFIG_KEY) || 'null'));
+    if (cfg) PERIOD_CONFIG = cfg;
+  } catch (e) { /* 깨진 저장값이면 기본 시정 그대로 */ }
+}
+
 var _todaySubjects = {};
+var _todayItems = {};   // {교시: 시간표 항목} — 컴시간 교체 정보(changed·orig)를 오늘 줄에 그릴 때 쓴다
+// 오늘·이번 주 시간표를 «받았는지»와 그 모양 — 주말·수업 없는 날·요일별 교시 수 판정에 쓴다
+var _todayLoaded = false, _todayCount = 0, _todayLastPeriod = 0, _weekHasData = false;
+// 이번 주 시간표에 적힌 «오늘» — 오늘 시간표 조회만 실패(나이스 트래픽 초과 등)해 빈 목록이 와도 오늘 수업을 안다(웹 칠판과 같은 규칙)
+var _weekTodayCount = 0, _weekTodayLast = 0;
+var _lastTodayList = null, _lastWeekMap = null;   // 시정이 바뀌면 이걸로 다시 그린다
 
 /* 설정 시트 C열의 글자 크기 5단계 → 실제 배율. 1단계가 기존 크기다.
    값은 ?api=board 응답(noticeStep/memoStep)으로 내려온다. */
@@ -492,7 +645,8 @@ function renderMeal(meals) {
     var mt = document.createElement('div'); mt.className = 'mt'; mt.textContent = (typeIcon[m.type] || '🍽️') + ' ' + m.type;
     mh.appendChild(mt);
     if (m.kcal) { var mk = document.createElement('div'); mk.className = 'mk'; mk.textContent = m.kcal + 'kcal'; mh.appendChild(mk); }
-    var mm = document.createElement('div'); mm.className = 'mm'; mm.innerHTML = (m.dishes || []).join('<br>');
+    // 반찬 이름은 나이스에서 온 글자다 — 줄바꿈(<br>)만 우리가 넣고 이름 자체는 이스케이프한다
+    var mm = document.createElement('div'); mm.className = 'mm'; mm.innerHTML = (Array.isArray(m.dishes) ? m.dishes : []).map(escHtml).join('<br>');
     wrap.appendChild(mh); wrap.appendChild(mm);
     if (m.allergy && m.allergy.length) {
       var ma = document.createElement('div'); ma.className = 'ma'; ma.textContent = '알레르기: ' + m.allergy.join(', ') + '번';
@@ -542,46 +696,75 @@ window.addEventListener('resize', function () {
   _fitTimer = setTimeout(refitAll, 200);
 });
 function renderPeriodRow(list) {
-  // 서버가 배열이 아닌 값을 주면 forEach에서 터져 화면 전체가 멈춘다(검사 중 실제로 겪음).
-  // 형태가 어긋나면 "수업 없음"으로 조용히 넘어가는 편이 낫다.
-  if (!Array.isArray(list)) list = [];
-  _todaySubjects = {};
-  // 같은 교시가 두 줄로 오고 하나는 과목이 비어 있는 학교가 있다(옛 판 GAS 사본).
-  // 빈 줄이 뒤에 와서 멀쩡한 과목을 지우지 않게 막는다. 새 GAS(v4.23~)는 서버에서 이미 걸러 준다.
-  list.forEach(function (x) { if (x.subject || !_todaySubjects[x.period]) _todaySubjects[x.period] = x.subject; });
+  // null = 통신 실패로 아직 한 번도 못 받음. «받았는데 비었음»([])과 갈라야 수업 없는 날로 오인하지 않는다.
+  // 서버가 배열이 아닌 값을 주면 forEach에서 터져 화면 전체가 멈춘다(검사 중 실제로 겪음) — 그것도 «못 받음»으로 본다.
+  if (list != null && !Array.isArray(list)) list = null;
+  _todaySubjects = {}; _todayItems = {};
+  // 같은 교시가 여러 줄로 오면(옛 판 GAS 사본) «과목이 있는 첫 줄»을 쓴다 — 주간표와 같은 규칙.
+  // 예전엔 오늘 줄은 나중 줄이, 주간표는 첫 줄(빈 과목이면 '-')이 이겨 같은 교시가 두 칸에서 달리 보일 수 있었다.
+  (list || []).forEach(function (x) {
+    if (x && x.subject && !_todaySubjects[x.period]) { _todaySubjects[x.period] = x.subject; _todayItems[x.period] = x; }
+  });
+  if (list) { _todayLoaded = true; _lastTodayList = list; }
+  _todayCount = 0; _todayLastPeriod = 0;
+  Object.keys(_todaySubjects).forEach(function (p) { _todayCount++; if (+p > _todayLastPeriod) _todayLastPeriod = +p; });
+
   var row = document.getElementById('periodRow'); if (!row) return;
-  if (!list || !list.length) { row.innerHTML = '<div class="today-empty">오늘은 수업이 없어요</div>'; return; }
+  if (!list) { row.innerHTML = '<div class="today-empty">시간표를 불러오지 못했어요 — 잠시 뒤 다시 받아요</div>'; return; }
+  if (!list.length) { row.innerHTML = '<div class="today-empty">오늘은 수업이 없어요</div>'; return; }
   row.innerHTML = '';
-  SCHEDULE.forEach(function (s) {
+  effectiveSchedule().forEach(function (s) {
     var el = document.createElement('div');
     if (s.type === 'lunch') { el.className = 'period lunch'; el.id = 'p-lunch'; el.innerHTML = '<div class="pn">점심</div><div class="ps">🍚 급식</div>'; }
-    else { el.className = 'period'; el.id = 'p-' + s.period; el.innerHTML = '<div class="pn">' + s.period + '교시</div><div class="ps">' + (_todaySubjects[s.period] || '-') + '</div>'; }
+    else {
+      // 컴시간 교체 수업(서버 v4.24: changed·orig) — «교체» 태그와 «원래 과목» 줄. 과목이 같으면 원래 줄은 뺀다.
+      var it = _todayItems[s.period], chg = !!(it && it.changed);
+      el.className = 'period' + (chg ? ' chg' : ''); el.id = 'p-' + s.period;
+      el.innerHTML = '<div class="pn">' + s.period + '교시' + (chg ? '<span class="chg-tag">교체</span>' : '') + '</div>'
+        + '<div class="ps">' + escHtml(_todaySubjects[s.period] || '-') + '</div>'
+        + (chg && it.orig && it.orig !== it.subject ? '<div class="po">원래 ' + escHtml(it.orig) + '</div>' : '');
+    }
     row.appendChild(el);
   });
 }
 function renderWeek(weekMap) {
   var wrap = document.getElementById('weekWrap'); if (!wrap) return;
-  weekMap = weekMap || {};
+  // null = 통신 실패로 아직 한 번도 못 받음 — «시간표 정보 없음»(나이스 미연결 등)과 구분한다
+  if (weekMap == null) { _weekHasData = false; wrap.innerHTML = '<div class="week-empty">시간표를 불러오지 못했어요 — 잠시 뒤 다시 받아요</div>'; return; }
+  if (typeof weekMap !== 'object' || Array.isArray(weekMap)) weekMap = {};
   var keys = Object.keys(weekMap);
+  _lastWeekMap = weekMap;
+  // 이번 주에 과목이 하나라도 있는지 — 없으면(나이스·컴시간 미연결) «오늘은 수업이 없어요» 판정을 하지 않는다
+  _weekHasData = keys.some(function (k) { return (Array.isArray(weekMap[k]) ? weekMap[k] : []).some(function (x) { return x && x.subject; }); });
+  _weekTodayCount = 0; _weekTodayLast = 0;
+  var _wt = weekMap[ymdKey(new Date())];
+  (Array.isArray(_wt) ? _wt : []).forEach(function (x) { if (x && x.subject) { _weekTodayCount++; if (+x.period > _weekTodayLast) _weekTodayLast = +x.period; } });
   if (!keys.length) { wrap.innerHTML = '<div class="week-empty">시간표 정보가 없어요</div>'; return; }
   var days = ['월', '화', '수', '목', '금'];
   var now = new Date(); var dow = now.getDay(); var mon = new Date(now); mon.setDate(now.getDate() - ((dow + 6) % 7));
   var dayKeys = []; for (var i = 0; i < 5; i++) { var d = new Date(mon); d.setDate(mon.getDate() + i); dayKeys.push(ymdKey(d)); }
   var todayKey = ymdKey(now);
   var maxP = PERIOD_CONFIG.maxPeriod || 7;
+  var anyChg = false;
   var html = '<table class="week"><thead><tr><th class="pnum"></th>';
   days.forEach(function (d, i) { html += '<th' + (dayKeys[i] === todayKey ? ' class="today"' : '') + '>' + d + '</th>'; });
   html += '</tr></thead><tbody>';
   for (var p = 1; p <= maxP; p++) {
     html += '<tr><td class="pnum">' + p + '</td>';
     dayKeys.forEach(function (k) {
-      var subj = '-'; var day = weekMap[k] || [];
-      for (var j = 0; j < day.length; j++) { if (day[j].period === p) { subj = day[j].subject || '-'; break; } }
-      html += '<td' + (k === todayKey ? ' class="today-col"' : '') + '>' + subj + '</td>';
+      var subj = '-', hit = null;
+      var day = Array.isArray(weekMap[k]) ? weekMap[k] : [];
+      // 같은 교시가 여러 줄이어도(옛 판 사본) 과목이 있는 첫 줄을 찾을 때까지 본다 — 오늘 줄과 같은 규칙
+      for (var j = 0; j < day.length; j++) { if (day[j] && day[j].period === p && day[j].subject) { subj = day[j].subject; hit = day[j]; break; } }
+      var chg = !!(hit && hit.changed); if (chg) anyChg = true;
+      var cls = []; if (k === todayKey) cls.push('today-col'); if (chg) cls.push('chg');
+      html += '<td' + (cls.length ? ' class="' + cls.join(' ') + '"' : '') + (chg && hit.orig ? ' title="원래 ' + escHtml(hit.orig) + '"' : '') + '>' + escHtml(subj) + '</td>';
     });
     html += '</tr>';
   }
   html += '</tbody></table>';
+  // 이번 주에 교체 수업이 하나라도 있으면 표 위에 범례를 붙인다(색이 무슨 뜻인지 학생이 알 수 있게)
+  if (anyChg) html = '<div class="week-legend"><span class="sw"></span>이번 주 교체 수업</div>' + html;
   wrap.innerHTML = html;
   fitWeekBox(); // 표를 새로 그렸으니 소리 패널과 겹치지 않게 다시 잰다
   if (document.fonts && document.fonts.ready) document.fonts.ready.then(fitWeekBox);
@@ -596,7 +779,7 @@ function startClock() {
     var dateEl = document.getElementById('sDate');
     if (dateEl) dateEl.textContent = (now.getMonth() + 1) + '월 ' + now.getDate() + '일 (' + ['일', '월', '화', '수', '목', '금', '토'][now.getDay()] + ')';
     var nowMin = now.getHours() * 60 + now.getMinutes();
-    var st = currentPeriodStatus(nowMin);
+    var st = currentPeriodStatus(nowMin, now);   // 날짜도 넘긴다 — 주말 판정
     var chip = document.getElementById('statusChip');
     if (chip) { chip.textContent = st.label; chip.className = 'status' + (st.lunch ? ' lunch' : '') + (st.off ? ' off' : ''); }
     document.querySelectorAll('.period').forEach(function (p) { p.classList.remove('now'); });
@@ -609,7 +792,7 @@ function startClock() {
 /* ===== board 데이터 반영 ===== */
 // 공지 경로는 {board}만, 급식/시간표 경로는 {meal,todayTimetable,weekTimetable}만 나눠 온다.
 // 받은 필드만 다시 그리고, 안 온(undefined) 필드는 기존 화면을 그대로 둔다.
-// (빈 배열/빈 객체로 온 경우의 "없음" 표시는 각 render 함수가 유지 — undefined와는 구분된다.)
+// (빈 배열/빈 객체로 온 경우의 "없음" 표시, null로 온 «아직 못 받음» 표시는 각 render 함수가 한다 — undefined와는 구분된다.)
 function onBoardData(data) {
   if (data.board) {
     document.documentElement.setAttribute('data-theme', String(data.board.theme || 1));
@@ -617,7 +800,8 @@ function onBoardData(data) {
     renderNotice(data.board.notice, data.board.noticeStep);
     renderClassMemo(data.board.classMemo, data.board.memoStep);
     renderAgenda(data.board.agenda);
-    if (data.board.periodConfig) { PERIOD_CONFIG = data.board.periodConfig; SCHEDULE = buildSchedule(PERIOD_CONFIG); }
+    // 형태 검사 → 바뀌었으면 시정 재계산·시간표 다시 그림·마지막 정상값 저장(applyPeriodConfig 주석)
+    applyPeriodConfig(data.board.periodConfig);
   }
   if (data.meal !== undefined) renderMeal(data.meal);
   if (data.todayTimetable !== undefined) renderPeriodRow(data.todayTimetable);
@@ -723,11 +907,15 @@ function wireCfgModal() {
   document.getElementById('cfgSaveBtn').addEventListener('click', async function () {
     var statusEl = document.getElementById('cfgStatus');
     try {
-    var url = normalizeWebAppUrl(document.getElementById('cfgUrl').value);
-    var grade = document.getElementById('cfgGrade').value.trim();
-    var classNum = document.getElementById('cfgClass').value.trim();
-    if (!url || !grade || !classNum) { statusEl.textContent = 'URL·학년·반을 모두 입력하세요.'; statusEl.className = 'cfg-status err'; return; }
+    var url = cleanWebAppUrl(document.getElementById('cfgUrl').value);   // 교사 주소의 role·k·#해시는 여기서 떨어진다
+    var rawGrade = document.getElementById('cfgGrade').value, rawClass = document.getElementById('cfgClass').value;
+    if (!url || !rawGrade.trim() || !rawClass.trim()) { statusEl.textContent = 'URL·학년·반을 모두 입력하세요.'; statusEl.className = 'cfg-status err'; return; }
+    // «3학년»·«２반»은 고쳐서 받고, 고칠 수 없는 값은 저장을 막는다 — 그대로 저장하면 호출이 조용히 안 온다
+    var grade = normalizeClassNo(rawGrade), classNum = normalizeClassNo(rawClass);
+    if (!grade || !classNum) { statusEl.textContent = '학년·반은 숫자만 입력해 주세요 (예: 3, 2)'; statusEl.className = 'cfg-status err'; return; }
     document.getElementById('cfgUrl').value = url;   // 다듬은 주소를 눈으로 확인할 수 있게 되돌려 쓴다
+    document.getElementById('cfgGrade').value = grade;
+    document.getElementById('cfgClass').value = classNum;
 
     statusEl.textContent = '연결 확인 중... (최대 1분 걸릴 수 있습니다)'; statusEl.className = 'cfg-status';
     // GAS가 한동안 안 쓰이다 깨어나는 순간엔 응답이 8초를 넘겨 정상 URL도 "연결 실패"로 뜨던 문제 —
@@ -740,6 +928,14 @@ function wireCfgModal() {
     }
     if (!test.ok) {
       statusEl.textContent = '연결 실패: ' + test.error + ' (URL을 다시 확인하세요)';
+      statusEl.className = 'cfg-status err';
+      return;
+    }
+    // board는 학년·반이 어긋나도 대답한다 — 호출 목록(calls)이 «배열»로 오는지까지 봐야 저장 뒤 호출이 실제로 뜬다.
+    // (배열이 아니면 유콜 웹앱 주소가 아니거나 서버가 오류를 돌려준 것이다. board가 서버를 깨워 두었으니 한 번만 묻는다.)
+    var callsTest = await callApi(url, 'calls', { grade: grade, classNum: classNum }, 30000);
+    if (!callsTest.ok || !Array.isArray(callsTest.data)) {
+      statusEl.textContent = '연결 실패: 호출 목록을 받지 못했습니다 — ' + (callsTest.ok ? '응답 모양이 다릅니다' : callsTest.error) + ' (URL을 다시 확인하세요)';
       statusEl.className = 'cfg-status err';
       return;
     }
@@ -861,9 +1057,21 @@ window.addEventListener('DOMContentLoaded', function () {
   wireCfgModal();
 
   SETTINGS = loadSettings();
+  // 옛 판이 남긴 교사 열쇠(k) 붙은 주소·«3학년» 같은 값을 켤 때 정리해 다시 저장한다(네이티브 저장소 포함).
+  // 설정 화면으로 빠지기 전에 해야 한다 — 학년·반이 틀려 설정 화면이 떠도 k는 저장소에서 지워져야 한다.
+  SETTINGS = repairStoredSettings(SETTINGS);
   applyPrefsToUI(SETTINGS);
 
-  if (!isConfigured()) { openCfgModal(); return; }
+  if (!isConfigured()) {
+    openCfgModal();
+    // 저장값은 있는데 알아볼 수 없는 학년·반이면, 왜 설정 화면이 떴는지 글자로 남긴다
+    var badNo = function (v) { return String(v == null ? '' : v).trim() !== '' && !normalizeClassNo(v); };
+    if (badNo(SETTINGS.grade) || badNo(SETTINGS.classNum)) {
+      var st0 = document.getElementById('cfgStatus');
+      st0.textContent = '학년·반은 숫자만 입력해 주세요 (예: 3, 2)'; st0.className = 'cfg-status err';
+    }
+    return;
+  }
 
   showLastPollBadge();   // 뒤에서 감시가 언제까지 돌았는지 헤더에 남긴다
 
@@ -877,6 +1085,7 @@ window.addEventListener('DOMContentLoaded', function () {
   });
 
   document.getElementById('sBadge').textContent = SETTINGS.grade + '학년 ' + SETTINGS.classNum + '반';
+  loadStoredPeriodConfig();   // 지난번에 받은 시정을 먼저 — board가 늦거나 실패해도 기본 시정(4교시 뒤 점심)으로 그리지 않게
   SCHEDULE = buildSchedule(PERIOD_CONFIG);
   startClock();
   showStandby();
