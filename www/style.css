@@ -194,20 +194,24 @@ table.week td.pnum { color: var(--text2); font-size: 13px; font-size: calc(clamp
 .vval  { font-size: 11px; font-weight: 700; color: var(--yellow-d); min-width: 18px; text-align: right; }
 .tbtn2 { padding: 6px 10px; border-radius: 10px; font-size: 11px; font-weight: 700; color: var(--text2); white-space: nowrap; }
 
-.s-alert { position: absolute; top: 0; right: 0; bottom: 0; left: 0; display: none; flex-direction: column; align-items: center; justify-content: center; padding: 24px; z-index: 20; }
-.s-alert-inner { background: var(--bg); box-shadow: var(--sh-out); border-radius: var(--r-lg); border: 4px solid var(--yellow); padding: 40px 56px; display: flex; flex-direction: column; align-items: center; gap: 14px; text-align: center; min-width: 55vw; max-width: 90vw; animation: borderpulse 1.8s ease-in-out infinite; }
+/* 호출 화면 — 교사 메시지는 200자까지 온다. 글자 크기가 고정이라 작은 창·저해상도 칠판에서 위(번호)·아래(남은 초)가 잘렸다.
+   ① 크기는 --asc 배율로 줄인다(app.js fitAlertBox가 화면에 다 들어올 때까지). 바로 앞의 고정값은 var()를 모르는 옛 WebView용 — 그런 기기는 예전 크기 그대로.
+   ② 가운데 정렬은 안쪽 상자의 margin:auto로 한다. justify-content:center는 넘치면 위가 화면 밖으로 잘려 스크롤로도 못 본다.
+   ③ 띄어쓰기 없는 긴 글(주소 등)도 상자 안에서 줄을 바꾼다. */
+.s-alert { position: absolute; top: 0; right: 0; bottom: 0; left: 0; display: none; flex-direction: column; align-items: center; justify-content: flex-start; padding: 24px; z-index: 20; overflow-x: hidden; overflow-y: auto; }
+.s-alert-inner { background: var(--bg); box-shadow: var(--sh-out); border-radius: var(--r-lg); border: 4px solid var(--yellow); margin: auto; padding: 40px 56px; padding: calc(40px * var(--asc,1)) calc(56px * var(--asc,1)); display: flex; flex-direction: column; align-items: center; gap: 14px; gap: calc(14px * var(--asc,1)); text-align: center; min-width: 55vw; max-width: 90vw; animation: borderpulse 1.8s ease-in-out infinite; }
 @keyframes borderpulse { 0%,100% { border-color: var(--yellow); box-shadow: var(--sh-out); } 50% { border-color: var(--yellow-d); box-shadow: 0 0 60px rgba(255,217,125,.7), var(--sh-out); } }
-.s-lbl     { font-size: 15px; font-weight: 700; color: var(--yellow-ink); background: var(--yellow); padding: 7px 26px; border-radius: 20px; }
-.s-num     { font-size: 26px; font-weight: 700; color: var(--text2); }
-.s-name    { font-size: 96px; font-weight: 900; color: var(--text); line-height: 1; letter-spacing: -4px; }
-.s-san     { font-size: 44px; font-weight: 900; color: var(--text2); margin-top: -6px; }
-.s-msg     { font-size: 26px; font-weight: 700; color: var(--blue-d); background: var(--bg); padding: 11px 32px; border-radius: 16px; box-shadow: var(--sh-sm); }
-.s-teacher { font-size: 22px; font-weight: 700; color: var(--text2); background: var(--bg2); padding: 8px 28px; border-radius: 14px; box-shadow: var(--sh-sm); }
-.s-location { font-size: 19px; font-weight: 700; color: var(--yellow-ink); background: var(--yellow); padding: 8px 28px; border-radius: 14px; }
-.s-countdown { font-size: 16px; font-weight: 700; color: var(--text2); }
-.s-bar-wrap  { width: 100%; max-width: 380px; height: 8px; background: var(--border); border-radius: 4px; overflow: hidden; }
+.s-lbl     { font-size: 15px; font-size: calc(15px * var(--asc,1)); font-weight: 700; color: var(--yellow-ink); background: var(--yellow); padding: 7px 26px; padding: calc(7px * var(--asc,1)) calc(26px * var(--asc,1)); border-radius: 20px; }
+.s-num     { font-size: 26px; font-size: calc(26px * var(--asc,1)); font-weight: 700; color: var(--text2); }
+.s-name    { font-size: 96px; font-size: calc(96px * var(--asc,1)); font-weight: 900; color: var(--text); line-height: 1; letter-spacing: -4px; letter-spacing: calc(-4px * var(--asc,1)); max-width: 100%; overflow-wrap: break-word; word-wrap: break-word; }
+.s-san     { font-size: 44px; font-size: calc(44px * var(--asc,1)); font-weight: 900; color: var(--text2); margin-top: -6px; margin-top: calc(-6px * var(--asc,1)); }
+.s-msg     { font-size: 26px; font-size: calc(26px * var(--asc,1)); font-weight: 700; color: var(--blue-d); background: var(--bg); padding: 11px 32px; padding: calc(11px * var(--asc,1)) calc(32px * var(--asc,1)); border-radius: 16px; box-shadow: var(--sh-sm); max-width: 100%; word-break: keep-all; overflow-wrap: break-word; word-wrap: break-word; }
+.s-teacher { font-size: 22px; font-size: calc(22px * var(--asc,1)); font-weight: 700; color: var(--text2); background: var(--bg2); padding: 8px 28px; padding: calc(8px * var(--asc,1)) calc(28px * var(--asc,1)); border-radius: 14px; box-shadow: var(--sh-sm); max-width: 100%; word-break: keep-all; overflow-wrap: break-word; word-wrap: break-word; }
+.s-location { font-size: 19px; font-size: calc(19px * var(--asc,1)); font-weight: 700; color: var(--yellow-ink); background: var(--yellow); padding: 8px 28px; padding: calc(8px * var(--asc,1)) calc(28px * var(--asc,1)); border-radius: 14px; max-width: 100%; word-break: keep-all; overflow-wrap: break-word; word-wrap: break-word; }
+.s-countdown { font-size: 16px; font-size: calc(16px * var(--asc,1)); font-weight: 700; color: var(--text2); }
+.s-bar-wrap  { width: 100%; max-width: 380px; max-width: calc(380px * var(--asc,1)); height: 8px; background: var(--border); border-radius: 4px; overflow: hidden; flex-shrink: 0; }
 .s-bar       { height: 100%; background: var(--yellow-d); border-radius: 4px; transition: width 1s linear; }
-.s-queue     { font-size: 12px; font-weight: 700; color: var(--yellow-ink); background: var(--yellow); padding: 5px 16px; border-radius: 20px; }
+.s-queue     { font-size: 12px; font-size: calc(12px * var(--asc,1)); font-weight: 700; color: var(--yellow-ink); background: var(--yellow); padding: 5px 16px; padding: calc(5px * var(--asc,1)) calc(16px * var(--asc,1)); border-radius: 20px; }
 
 /* 최초 설정 / 설정 화면 (웹앱엔 없던, exe 전용 화면) */
 .cfg-modal { position: fixed; top: 0; right: 0; bottom: 0; left: 0; background: rgba(242,235,225,.97); display: none; flex-direction: column; align-items: center; justify-content: center; gap: 18px; z-index: 9999; padding: 32px; overflow-y: auto; }

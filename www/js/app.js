@@ -693,8 +693,30 @@ function fitMealBox() {
 var _fitTimer = null;
 window.addEventListener('resize', function () {
   clearTimeout(_fitTimer);
-  _fitTimer = setTimeout(refitAll, 200);
+  _fitTimer = setTimeout(function () { refitAll(); fitAlertBox(); }, 200);
 });
+// 숨어 있던 창·앱이 다시 보이면 호출 화면을 다시 잰다(숨은 동안엔 크기가 0이라 재지 않는다)
+document.addEventListener('visibilitychange', function () { if (!document.hidden) fitAlertBox(); });
+
+/* 호출 화면 맞춤 — 교사 메시지는 200자까지 온다. 글자 크기가 고정이라 기본 창(960×640)·1280×720 칠판에서
+   긴 메시지면(짧아도 선생님·장소·대기 건수가 다 붙으면) 위(번호)·아래(남은 초)가 화면 밖으로 잘렸다.
+   안쪽 상자가 화면에 다 들어올 때까지 --asc를 0.05씩 줄인다. 들어오면 1(원래 크기) 그대로 — 키우지는 않는다.
+   0.4까지 줄여도 넘치는 아주 작은 창이면 위(번호)부터 보이고 스크롤로 끝까지 볼 수 있다(style.css margin:auto).
+   ※ 웹(GAS index.html)·호환판·EXE 세 곳에 같은 사본이 있다 — 같이 고친다. */
+var ALERT_MIN_SCALE = 0.4;
+function fitAlertBox() {
+  var host = document.getElementById('sAlert');
+  var inner = host && host.querySelector('.s-alert-inner');
+  if (!inner || host.style.display === 'none') return;
+  // 창이 숨었거나(상주형·최소화) 아직 크기가 없으면 재지 않는다 — 0으로 재면 최소 배율로 굳는다. 보이면 다시 잰다.
+  if (document.hidden || host.clientHeight < 80 || host.clientWidth < 80) { inner.style.setProperty('--asc', '1'); return; }
+  var cs = getComputedStyle(host);
+  var availH = host.clientHeight - (parseFloat(cs.paddingTop) || 0) - (parseFloat(cs.paddingBottom) || 0);
+  var availW = host.clientWidth - (parseFloat(cs.paddingLeft) || 0) - (parseFloat(cs.paddingRight) || 0);
+  fitScaledBox(inner, '--asc', 1, function () {
+    return inner.offsetHeight > availH + 1 || inner.offsetWidth > availW + 1 || inner.scrollWidth > inner.clientWidth + 1;
+  }, ALERT_MIN_SCALE);
+}
 function renderPeriodRow(list) {
   // null = 통신 실패로 아직 한 번도 못 받음. «받았는데 비었음»([])과 갈라야 수업 없는 날로 오인하지 않는다.
   // 서버가 배열이 아닌 값을 주면 forEach에서 터져 화면 전체가 멈춘다(검사 중 실제로 겪음) — 그것도 «못 받음»으로 본다.
@@ -864,6 +886,8 @@ function showAlert(payload) {
   }
   updateBar();
   _alertTicker = setInterval(updateBar, 1000);
+  fitAlertBox();
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(fitAlertBox);
 }
 
 /* ===== 설정 화면 ===== */
