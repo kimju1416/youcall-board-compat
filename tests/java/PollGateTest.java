@@ -44,15 +44,19 @@ public class PollGateTest {
 
         // 2. 실패가 이어질 때 간격
         eq(PollGate.nextDelayMs(2000, 0), 2000, "서비스 실패 0 → 2초");
-        eq(PollGate.nextDelayMs(2000, 1), 4000, "서비스 실패 1 → 4초");
-        eq(PollGate.nextDelayMs(2000, 2), 8000, "서비스 실패 2 → 8초");
-        eq(PollGate.nextDelayMs(2000, 3), 15000, "서비스 실패 3 → 15초(상한)");
+        // 1.3.6: 두 번째 실패까지는 물러나지 않는다(가끔 실패하는 서버에서 호출이 늦게 뜨던 것)
+        eq(PollGate.nextDelayMs(2000, 1), 2000, "서비스 실패 1 → 2초 그대로");
+        eq(PollGate.nextDelayMs(2000, 2), 2000, "서비스 실패 2 → 2초 그대로");
+        eq(PollGate.nextDelayMs(2000, 3), 4000, "서비스 실패 3 → 4초");
+        eq(PollGate.nextDelayMs(2000, 4), 8000, "서비스 실패 4 → 8초");
+        eq(PollGate.nextDelayMs(2000, 5), 15000, "서비스 실패 5 → 15초(상한)");
         eq(PollGate.nextDelayMs(2000, 50), 15000, "오래 실패해도 15초");
         eq(PollGate.nextDelayMs(2000, Integer.MAX_VALUE), 15000, "넘침 없이 15초");
         eq(PollGate.nextDelayMs(2000, -3), 2000, "음수 → 기본");
-        eq(PollGate.nextDelayMs(3000, 1), 6000, "화면 실패 1 → 6초");
-        eq(PollGate.nextDelayMs(3000, 2), 12000, "화면 실패 2 → 12초");
-        eq(PollGate.nextDelayMs(3000, 3), 15000, "화면 실패 3 → 15초");
+        eq(PollGate.nextDelayMs(3000, 2), 3000, "화면 실패 2 → 3초 그대로");
+        eq(PollGate.nextDelayMs(3000, 3), 6000, "화면 실패 3 → 6초");
+        eq(PollGate.nextDelayMs(3000, 4), 12000, "화면 실패 4 → 12초");
+        eq(PollGate.nextDelayMs(3000, 5), 15000, "화면 실패 5 → 15초");
 
         // 3. 화면이 앞에서 이미 띄운 호출인가
         String list = "5:" + (now - 60_000) + ",7:" + (now - 1000);

@@ -402,7 +402,7 @@ check('5-5 통신 실패(null)는 «받았는데 빔»([])과 구분한다', () 
 check('5-6 refreshMeal: 한 번도 못 받은 시간표는 null로, 받은 뒤 실패하면 직전값 유지(last-good)', async () => {
   const seen = [];
   let fail = true;
-  const c = sandbox(['refreshMeal', 'isConfigured'], { vars: ['POLL_MS', 'pollTimer', 'lastMeal'], optional: ['normalizeClassNo'] });
+  const c = sandbox(['refreshMeal', 'isConfigured'], { vars: ['POLL_MS', 'pollTimer', 'lastMeal', 'BOARD_CACHE_KEY'], optional: ['normalizeClassNo', 'cacheScope', 'saveDayCache', 'ymdKey'] });
   c.SETTINGS = { webAppUrl: 'https://a.b/exec', grade: '3', classNum: '2' };
   c.setTimeout = () => 1; c.clearTimeout = () => {};
   const T = todayList(7), W = subjWeek(7);
@@ -611,7 +611,7 @@ if (FLAVOR === 'compat') {
     same(log.getCalls, 2, '응답이 온 뒤 다음 차례에는 다시 묻는다');
     release({ ok: true, data: [] }); await flush();
   });
-  check('L-3 화면: 실패가 이어지면 3→6→12→15초로 물러나고 성공하면 3초로 — 서비스(PollGate)와 같은 간격표', async () => {
+  check('L-3 화면: 두 번째 실패까지는 3초 그대로, 세 번째부터 6→12→15초로 물러나고 성공하면 3초로 — 서비스(PollGate)와 같은 간격표', async () => {
     let fail = true;
     const { c, log } = tickBox(() => Promise.resolve(fail ? { ok: false, error: 'HTTP 500' } : { ok: true, data: [] }));
     const T0 = 1789000000000, sentAt = [];
@@ -621,11 +621,11 @@ if (FLAVOR === 'compat') {
       await c.tick(); await flush();
       if (log.getCalls > before) sentAt.push(t);
     }
-    same(sentAt, [0, 6000, 18000, 33000, 48000], '실패가 이어질 때 보낸 시각(3초 박자 위)');
+    same(sentAt, [0, 3000, 6000, 12000, 24000, 39000, 54000], '실패가 이어질 때 보낸 시각(3초 박자 위, 두 번째 실패까지는 물러나지 않음)');
     fail = false;
-    c.__NOW = T0 + 63000; await c.tick(); await flush();
+    c.__NOW = T0 + 69000; await c.tick(); await flush();
     const b = log.getCalls;
-    c.__NOW = T0 + 66000; await c.tick(); await flush();
+    c.__NOW = T0 + 72000; await c.tick(); await flush();
     same(log.getCalls - b, 1, '성공한 뒤에는 바로 다음 3초 차례에 묻는다');
     ok(JAVA_DELAYS, 'L-1이 자바 간격표를 못 만들어 대조하지 못했다');
     const F = [0, 1, 2, 3, 4, 5, 6, 7, 8];
@@ -679,7 +679,7 @@ if (FLAVOR === 'compat') {
   });
   check('L-6 급식·시간표 셋을 한꺼번에 보내지 않고 차례로 (켤 때·30분마다 몰림 줄이기)', async () => {
     const pending = [];
-    const c = sandbox(['refreshMeal', 'isConfigured'], { vars: ['POLL_MS', 'pollTimer', 'lastMeal'], optional: ['normalizeClassNo'] });
+    const c = sandbox(['refreshMeal', 'isConfigured'], { vars: ['POLL_MS', 'pollTimer', 'lastMeal', 'BOARD_CACHE_KEY'], optional: ['normalizeClassNo', 'cacheScope', 'saveDayCache', 'ymdKey'] });
     c.SETTINGS = { webAppUrl: 'https://a.b/exec', grade: '3', classNum: '2' };
     c.setTimeout = () => 1; c.clearTimeout = () => {};
     const req = name => new Promise(r => pending.push({ name, r }));
@@ -765,11 +765,14 @@ if (FLAVOR === 'compat') {
     same(a.log.getCalls - a1, 1, '시계가 1시간 뒤로 가도 곧바로 다시 묻는다');
     // (2) 200인데 목록(배열)이 아닌 답 — 서비스는 JSONArray로 못 읽어 실패로 센다. 화면도 같게.
     const b = tickBox(() => Promise.resolve({ ok: true, data: { ok: false, msg: '알 수 없는 api' } }));
+    //     1.3.6부터 두 번째 실패까지는 물러나지 않으므로 세 번 이어진 뒤에 본다
     b.c.__NOW = T0; await b.c.tick(); await flush();
-    const b1 = b.log.getCalls;
     b.c.__NOW = T0 + 3000; await b.c.tick(); await flush();
-    same(b.log.getCalls - b1, 0, '목록이 아닌 답 뒤에는 물러난다');
-    same(b.log.standby, 1, '목록이 아닌 답이면 대기화면(예전 동작 유지)');
+    b.c.__NOW = T0 + 6000; await b.c.tick(); await flush();
+    const b1 = b.log.getCalls;
+    b.c.__NOW = T0 + 9000; await b.c.tick(); await flush();
+    same([b1, b.log.getCalls - b1], [3, 0], '목록이 아닌 답도 실패로 세어 세 번 이어지면 물러난다');
+    ok(b.log.standby >= 1, '목록이 아닌 답이면 대기화면(예전 동작 유지)');
     // (3) 상주형 칠판에서 요청이 돌아오기 전에 호출 화면이 마감 — 확인은 곧바로 보내고, 화면은 응답을 받은 뒤 정한다(1.3.3과 같게).
     //     먼저 닫으면 상주형이 내려가 버려, 응답에 실려 온 «대기 중인 다음 호출»이 뒤에서 떠 안 보인다(1.3.4 재검수)
     let release = null;
@@ -805,7 +808,7 @@ if (FLAVOR === 'compat') {
   check('L-11 급식을 한 번도 못 받았으면 «없어요»가 아니라 «불러오지 못했어요» / 받은 뒤 실패하면 직전값', async () => {
     const seen = [];
     let fail = true;
-    const c = sandbox(['refreshMeal', 'isConfigured'], { vars: ['POLL_MS', 'pollTimer', 'lastMeal'], optional: ['normalizeClassNo'] });
+    const c = sandbox(['refreshMeal', 'isConfigured'], { vars: ['POLL_MS', 'pollTimer', 'lastMeal', 'BOARD_CACHE_KEY'], optional: ['normalizeClassNo', 'cacheScope', 'saveDayCache', 'ymdKey'] });
     c.SETTINGS = { webAppUrl: 'https://a.b/exec', grade: '3', classNum: '2' };
     c.setTimeout = () => 1; c.clearTimeout = () => {};
     const M = [{ type: '중식', dishes: ['밥', '국'], kcal: '700', allergy: [] }];
@@ -837,6 +840,170 @@ if (FLAVOR === 'compat') {
     await c.speakAsync('가상학생', 1);
     ok(!atobCalled, '실패 표시를 base64로 해독하려 했다');
     same(st[st.length - 1], '⚠️ 음성 준비 실패', '마지막 상태 문구');
+  });
+
+  /* 2026-09-14 현장 제보(1.3.6) — 칠판에서 앱이 다시 켜질 때마다 왼쪽 위 «학년 반»·자동닫힘 30초·«불러오지 못했어요»로 돌아가던 것 */
+  function cacheBox(names, opts) {
+    opts = opts || {};
+    const reg = {}, attrs = {};
+    const c = sandbox(names, { vars: ['POLL_MS', 'pollTimer', 'alertedRows', 'lastMeal', 'BOARD_CACHE_KEY'], optional: ['normalizeClassNo', 'ymdKey', 'validDismiss', 'boardRetryDelayMs'], storage: opts.storage });
+    c.document = { getElementById: id => reg[id] || (reg[id] = new El('div')), documentElement: { setAttribute: (k, v) => { attrs[k] = v; } } };
+    c.SETTINGS = Object.assign({ webAppUrl: 'https://a.b/exec', grade: '3', classNum: '2' }, opts.settings || {});
+    c.__NOW = opts.now || new Date(2026, 8, 15, 10, 23).getTime();
+    vm.runInContext('Math.random = function () { return 0; };', c);   // 재시도 흩뜨림 0초로 고정
+    return { c, reg, attrs };
+  }
+  function timerBox(box) {
+    const t = { list: [], cleared: [] };
+    box.c.setTimeout = (f, ms) => { t.list.push({ f, ms, id: t.list.length + 1 }); return t.list.length; };
+    box.c.clearTimeout = id => { t.cleared.push(id); };
+    return t;
+  }
+  const BOARD_FNS = ['refreshBoard', 'isConfigured', 'cacheScope', 'saveBoardCache'];
+  check('L-13 설정(board)을 못 받으면 30초부터 늘려 가며 다시 받고, 받은 학교 이름·자동닫힘은 기억해 다음에 켤 때 곧바로 쓴다(같은 주소·반만)', async () => {
+    const seen = [];
+    let resp = { ok: false, error: 'HTTP 500' };
+    const box = cacheBox(BOARD_FNS), { c } = box, T = timerBox(box);
+    c.api = { getBoard: () => Promise.resolve(resp) };
+    c.onBoardData = d => seen.push(d);
+    await c.refreshBoard();
+    same(T.list.map(t => t.ms), [30000], '한 번도 못 받았으면 30초 뒤 다시(예전엔 3분)');
+    T.list[0].f(); await flush(); await flush();
+    T.list[1].f(); await flush(); await flush();
+    T.list[2].f(); await flush(); await flush();
+    T.list[3].f(); await flush(); await flush();
+    same(T.list.map(t => t.ms), [30000, 60000, 120000, 180000, 180000], '실패가 이어지면 1분·2분·3분(상한)으로 늘린다 — 한도에 걸린 서버를 15초마다 두드리지 않게');
+    same(boardRetryDelayMsWith(0.5), 35000, '칠판마다 0~10초 흩뜨린다');
+    resp = { ok: true, data: { schoolName: '가상중학교', autoDismiss: 10, theme: 2 } };
+    T.list[4].f(); await flush(); await flush();
+    same([vm.runInContext('autoDismissSec', c), seen.length, vm.runInContext('boardFails', c)], [10, 1, 0], '받으면 자동닫힘 적용·화면 반영·실패 수 초기화');
+    resp = { ok: false, error: 'HTTP 500' };
+    await c.refreshBoard();
+    same(T.list.length, 5, '한 번 받은 뒤의 실패는 재시도 없이 3분 주기를 기다린다');
+    resp = { ok: true, data: { schoolName: '가상중학교', autoDismiss: 5000, theme: 2 } };
+    await c.refreshBoard();
+    same(vm.runInContext('autoDismissSec', c), 10, '범위 밖 자동닫힘(5000초)은 받지 않는다 — 켤 때 기준과 같게');
+    // 모양이 틀린 답: 목록·오류 답({ok:false})
+    for (const bad of [[1, 2], { ok: false, msg: '알 수 없는 api' }]) {
+      const fb = cacheBox(BOARD_FNS, { storage: { yc_board_cache: JSON.stringify({ scope: 'https://a.b/exec|3|2', schoolName: '가상중학교', autoDismiss: 10 }) } });
+      const ft = timerBox(fb);
+      fb.c.api = { getBoard: () => Promise.resolve({ ok: true, data: bad }) };
+      fb.c.onBoardData = () => { throw new Error('모양이 틀린 답을 그렸다: ' + JSON.stringify(bad)); };
+      await fb.c.refreshBoard();
+      same(ft.list.map(t => t.ms), [30000], '200인데 ' + JSON.stringify(bad) + '도 못 받은 것으로 친다');
+      same(JSON.parse(fb.c.localStorage.m.yc_board_cache).schoolName, '가상중학교', '틀린 답으로 기억한 학교 이름을 덮지 않는다');
+    }
+    // 재시도와 3분 주기가 겹쳐 돌 때: 재시도 실패가 먼저 와서 예약을 걸고, 3분 주기 성공이 뒤에 오면 그 예약을 지운다
+    const ob = cacheBox(BOARD_FNS), ot = timerBox(ob), pend = [];
+    ob.c.api = { getBoard: () => new Promise(r => pend.push(r)) };
+    ob.c.onBoardData = () => {};
+    const r1 = ob.c.refreshBoard(), r2 = ob.c.refreshBoard();
+    await flush();
+    pend[0]({ ok: false, error: 'HTTP 500' }); await r1;
+    same(ot.list.length, 1, '먼저 온 실패가 예약을 건다');
+    pend[1]({ ok: true, data: { schoolName: '가상중학교', autoDismiss: 10 } }); await r2;
+    ok(ot.cleared.indexOf(1) >= 0 && vm.runInContext('boardRetryTimer', ob.c) === null, '받은 뒤에도 재시도 예약이 남는다(헛요청)');
+    // 다음에 켤 때 — 같은 저장소
+    const store = Object.assign({}, c.localStorage.m);
+    const same1 = cacheBox(['applyStoredBoard', 'cacheScope'], { storage: store });
+    same1.c.applyStoredBoard();
+    same([same1.reg.sBadge.textContent, vm.runInContext('autoDismissSec', same1.c), same1.attrs['data-theme'], vm.runInContext('boardFromCache', same1.c)], ['가상중학교 3학년 2반', 10, '2', true], '켜자마자 학교 이름·자동닫힘·테마');
+    const other = cacheBox(['applyStoredBoard', 'cacheScope'], { storage: store, settings: { classNum: '3' } });
+    other.c.applyStoredBoard();
+    same([other.reg.sBadge.textContent, vm.runInContext('autoDismissSec', other.c), vm.runInContext('boardFromCache', other.c)], ['3학년 3반', 30, false], '다른 반이면 기억한 값을 쓰지 않는다');
+    const url2 = cacheBox(['applyStoredBoard', 'cacheScope'], { storage: store, settings: { webAppUrl: 'https://c.d/exec' } });
+    url2.c.applyStoredBoard();
+    same(url2.reg.sBadge.textContent, '3학년 2반', '다른 시트 주소면 기억한 값을 쓰지 않는다');
+    const big = cacheBox(['applyStoredBoard', 'cacheScope'], { storage: { yc_board_cache: JSON.stringify({ scope: 'https://a.b/exec|3|2', schoolName: '가상중학교', autoDismiss: 5000 }) } });
+    big.c.applyStoredBoard();
+    same(vm.runInContext('autoDismissSec', big.c), 30, '기억한 값도 범위 밖이면 쓰지 않는다');
+    const broken = cacheBox(['applyStoredBoard', 'cacheScope'], { storage: { yc_board_cache: '{깨짐' } });
+    broken.c.applyStoredBoard();
+    same(broken.reg.sBadge.textContent, '3학년 2반', '깨진 저장값이면 학년·반만');
+    ok(/applyStoredBoard\(\);/.test(SRC) && !/getElementById\('sBadge'\)\.textContent = SETTINGS\.grade/.test(SRC), '켤 때 기억한 값을 쓰지 않고 «학년 반»만 적는다');
+    ok(/if \(boardRetryTimer\) \{ clearTimeout\(boardRetryTimer\); boardRetryTimer = null; \}/.test(fn('startPolling')), '다시 시작할 때 재시도 예약을 지우지 않는다');
+  });
+  function boardRetryDelayMsWith(r) {
+    const b = sandbox(['boardRetryDelayMs'], { vars: ['POLL_MS'] });
+    vm.runInContext('Math.random = function () { return ' + r + '; };', b);
+    return b.boardRetryDelayMs(1);
+  }
+  const MEAL_FNS = ['refreshMeal', 'isConfigured', 'cacheScope', 'saveDayCache'];
+  const MEAL_M = [{ type: '중식', dishes: ['밥', '국'], kcal: '700', allergy: [] }];
+  function mealApi(box, mealOk) {
+    box.c.setTimeout = () => 1; box.c.clearTimeout = () => {};
+    box.c.api = {
+      getMeal: () => Promise.resolve(mealOk() ? { ok: true, data: MEAL_M } : { ok: false, error: 'HTTP 500' }),
+      getTimetable: (u, g, cn, scope) => Promise.resolve(scope === 'week' ? { ok: false, error: 'HTTP 500' } : { ok: true, data: todayList(7) })
+    };
+  }
+  function bootDay(store, opts) {
+    const b = cacheBox(['loadDayCache', 'cacheScope'], Object.assign({ storage: store }, opts));
+    const seen = []; b.c.onBoardData = d => seen.push(d);
+    b.c.loadDayCache();
+    return { seen, c: b.c };
+  }
+  check('L-14 오늘 받은 급식·시간표를 기억해 다시 켜질 때 곧바로 그린다(같은 주소·반, 칸마다 받은 날이 오늘일 때만)', async () => {
+    const box = cacheBox(MEAL_FNS);
+    mealApi(box, () => true);
+    box.c.onBoardData = () => {};
+    await box.c.refreshMeal();
+    const store = Object.assign({}, box.c.localStorage.m);
+    const a = bootDay(store);
+    same(a.seen.length, 1, '같은 날·같은 반이면 곧바로 그린다');
+    same([a.seen[0].meal, a.seen[0].todayTimetable.length, 'weekTimetable' in a.seen[0]], [MEAL_M, 7, false], '받은 칸만 그리고 못 받은 주간표는 건드리지 않는다(«불러오는 중» 그대로)');
+    same(vm.runInContext('lastMeal', a.c), MEAL_M, '직전값으로도 올려 둔다(다음 실패 때 유지)');
+    same(bootDay(store, { now: new Date(2026, 8, 16, 8, 0).getTime() }).seen.length, 0, '다음 날이면 쓰지 않는다');
+    same(bootDay(store, { settings: { grade: '1' } }).seen.length, 0, '다른 반이면 쓰지 않는다');
+    same(bootDay({ yc_day_cache: 'x' }).seen.length, 0, '깨진 저장값이면 쓰지 않는다');
+    ok(/showStandby\(\);\s*\n\s*loadDayCache\(\);/.test(SRC), '켤 때(시정을 정한 뒤) 기억한 급식·시간표를 그리지 않는다');
+  });
+  check('L-15 자정을 넘기면 어제 급식을 오늘 것으로 저장하거나 보여 주지 않는다 (검수에서 재현한 결함)', async () => {
+    // 9/14 23:50 급식·시간표 받음 → 9/15 00:20 급식만 실패·시간표 성공
+    let mealOk = true;
+    const box = cacheBox(MEAL_FNS, { now: new Date(2026, 8, 14, 23, 50).getTime() });
+    mealApi(box, () => mealOk);
+    const seen = []; box.c.onBoardData = d => seen.push(d);
+    await box.c.refreshMeal();
+    same(seen[0].meal, MEAL_M, '23:50 급식 받음');
+    box.c.__NOW = new Date(2026, 8, 15, 0, 20).getTime(); mealOk = false;
+    await box.c.refreshMeal();
+    same([seen[1].meal, seen[1].todayTimetable.length], [null, 7], '자정 뒤 급식이 실패하면 어제 급식을 직전값으로 쓰지 않고 «못 받음»');
+    const store = Object.assign({}, box.c.localStorage.m);
+    const morning = bootDay(store, { now: new Date(2026, 8, 15, 9, 0).getTime() });
+    same([morning.seen.length, 'meal' in (morning.seen[0] || {}), ((morning.seen[0] || {}).todayTimetable || []).length], [1, false, 7], '아침에 다시 켜도 어제 급식은 안 그리고 오늘 받은 시간표만');
+    // 요청을 23:59에 보내 00:00 넘어 받은 경우 — 어느 날 것인지 모르니 받은 것으로 치지 않는다
+    const edge = cacheBox(MEAL_FNS, { now: new Date(2026, 8, 14, 23, 59, 59).getTime() });
+    edge.c.setTimeout = () => 1; edge.c.clearTimeout = () => {};
+    edge.c.api = {
+      getMeal: () => { edge.c.__NOW = new Date(2026, 8, 15, 0, 0, 3).getTime(); return Promise.resolve({ ok: true, data: MEAL_M }); },
+      getTimetable: () => Promise.resolve({ ok: true, data: todayList(7) })
+    };
+    const es = []; edge.c.onBoardData = d => es.push(d);
+    await edge.c.refreshMeal();
+    same([es[0].meal, es[0].todayTimetable], [null, null], '자정을 걸쳐 받은 답은 받은 것으로 치지 않는다');
+    ok(!('yc_day_cache' in edge.c.localStorage.m), '자정을 걸쳐 받은 답을 저장했다');
+  });
+  check('L-16 지난번 값을 적용했으면 board 응답을 기다리지 않고 곧바로 호출 확인을 시작한다 (다시 켜질 때 첫 호출이 8초 늦던 것)', async () => {
+    function run(fromCache) {
+      const order = [], answer = [];
+      const c = sandbox(['startPolling'], { vars: ['POLL_MS', 'pollTimer'] });
+      c.setInterval = () => 1; c.clearInterval = () => {}; c.setTimeout = () => 2; c.clearTimeout = () => {};
+      c.refreshMeal = () => order.push('meal'); c.tick = () => order.push('tick');
+      c.refreshBoard = () => { order.push('board'); return new Promise(r => answer.push(r)); };   // 검사가 답을 줄 때까지 안 오는 서버
+      vm.runInContext('boardFromCache = ' + fromCache + ';', c);
+      c.startPolling();
+      return { order, answer };
+    }
+    const hit = run(true); await flush();
+    same(hit.order, ['board', 'tick'], '기억한 값이 있으면 board를 기다리지 않고 호출 확인만 곧바로 — 급식은 board 뒤로(켜는 순간 요청 셋이 겹치지 않게)');
+    hit.answer[0](); await flush(); await flush();
+    same(hit.order.filter(x => x === 'meal').length, 1, 'board 답이 온 뒤 급식을 한 번 받는다');
+    same(hit.order.filter(x => x === 'tick').length, 1, 'board 답이 와도 호출 확인을 다시 시작하지 않는다(박자가 겹치지 않게)');
+    const miss = run(false); await flush();
+    same(miss.order, ['board'], '기억한 값이 없으면 예전처럼 board를 먼저 받는다(시정·자동닫힘)');
+    miss.answer[0](); await flush(); await flush();
+    same([miss.order.indexOf('meal') > 0, miss.order.indexOf('tick') > 0], [true, true], 'board 뒤에 급식·호출 확인');
   });
 }
 

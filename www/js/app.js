@@ -188,25 +188,75 @@ var api = {
 // POLL_MS: 호출 감지 주기 — 서버 동시접속 부하를 줄이려 3초. (EXE main.js와 동일 상수)
 // BOARD_REFRESH_MS: 공지/설정만 자주(3분). MEAL_REFRESH_MS: 급식/시간표는 드물게(30분).
 // MEAL_RETRY_MS: 급식/시간표 실패 시 30분 안 기다리고 90초 뒤 1회 재시도.
-var POLL_MS = 3000, BOARD_REFRESH_MS = 3 * 60 * 1000, MEAL_REFRESH_MS = 30 * 60 * 1000, MEAL_RETRY_MS = 90 * 1000;
-var pollTimer = null, boardTimer = null, mealTimer = null, mealRetryTimer = null, pollStartTimer = null;
-var alertedRows = {}, current = null, autoDismissSec = 30;
+// BOARD_RETRY_MS: 공지/설정을 한 번도 못 받았으면 3분 주기를 기다리지 않고 30초→1분→2분→3분(+0~10초 흩뜨림)으로 다시(1.3.6).
+//   예전엔 3분 동안 자동닫힘이 기본 30초·왼쪽 위에 학교 이름 없음으로 떴다. 고정 간격이면 같이 켠 칠판들이 한도에 걸린 서버로 같은 순간에 몰린다(검수).
+var POLL_MS = 3000, BOARD_REFRESH_MS = 3 * 60 * 1000, MEAL_REFRESH_MS = 30 * 60 * 1000, MEAL_RETRY_MS = 90 * 1000, BOARD_RETRY_MS = 30 * 1000, BOARD_RETRY_MAX_MS = 3 * 60 * 1000;
+var pollTimer = null, boardTimer = null, mealTimer = null, mealRetryTimer = null, pollStartTimer = null, boardRetryTimer = null, boardFromCache = false;
+var alertedRows = {}, current = null, autoDismissSec = 30, boardEverOk = false, boardFails = 0;
 
 /* ===== 서버 부하 줄이기 (1.3.4) =====
    2026-09-14 18개 반 학교의 «트래픽 오류»: 칠판 한 대가 상주 서비스(2초)와 이 화면(3초) 두 갈래로 서버에 물어
    18대면 초당 15번, 구글 서버 동시 실행이 30개 안팎이었다.
    · 이 화면이 묻는 동안 «묻는 중»을 네이티브 저장소에 적는다 → 앱이 앞에 있으면 서비스는 그걸 보고 쉰다(YouCallService·PollGate).
      앞에 있을 때 호출을 띄우고 소리 내는 건 원래 이 화면이라 호출이 뜨는 속도는 그대로다.
-   · 앞 요청이 안 끝났으면 겹쳐 보내지 않는다 / 실패가 이어지면 3→6→12→15초로 물러났다가 성공하면 3초로 돌아온다.
-   POLL_MAX_MS·물러나는 규칙은 PollGate.nextDelayMs와 같아야 한다(tests/test-v120.js L-3이 대조). */
-var WEB_POLL_KEY = 'yc_web_poll', WEB_ALERTED_KEY = 'yc_web_alerted', SVC_YIELD_KEY = 'yc_svc_yield', POLL_MAX_MS = 15000;
+   · 앞 요청이 안 끝났으면 겹쳐 보내지 않는다 / 실패가 세 번 이어지면 6→12→15초로 물러났다가 성공하면 3초로 돌아온다.
+   · 두 번째 실패까지는 물러나지 않는다(1.3.6) — 1.3.4는 한 번만 실패해도 6초를 쉬어, 서버가 «가끔» 실패하는 학교에서
+     호출이 늦게 떴다(실측: 실패 20%에서 10번 중 9번이 뜨는 시간 1.3.3 4.1초 → 1.3.4 9.0초, 물러나기만 뺀 대조군 5.7초).
+     서버가 한도에 걸려 계속 실패할 때는 세 번째부터 물러나니 요청 줄이기는 그대로다.
+   POLL_MAX_MS·POLL_GRACE_FAILS·물러나는 규칙은 PollGate.nextDelayMs와 같아야 한다(tests/test-v120.js L-3이 대조). */
+var WEB_POLL_KEY = 'yc_web_poll', WEB_ALERTED_KEY = 'yc_web_alerted', SVC_YIELD_KEY = 'yc_svc_yield', POLL_MAX_MS = 15000, POLL_GRACE_FAILS = 2;
 var pollBusy = false, pollFails = 0, pollNextAt = 0, webAlerted = [];
 
 // 급식/시간표 직전 성공값(last-good) — NEIS 일시 실패 시 빈값으로 덮지 않고 이 값을 유지한다.
 // 시간표는 처음에 null(아직 못 받음)이다 — []·{}로 두면 «받았는데 비었음»과 구분이 안 돼
 // 첫 요청이 실패한 날이 «오늘은 수업이 없어요»로 보인다.
 // 급식도 처음엔 null(못 받음) — []로 두면 서버 오류로 한 번도 못 받은 날이 «오늘은 급식이 없어요»로 보였다(1.3.5, 전수 점검).
-var lastMeal = null, lastToday = null, lastWeek = null;
+var lastMeal = null, lastToday = null, lastWeek = null, lastMealDay = '', lastTodayDay = '', lastWeekDay = '';
+
+/* 켤 때 먼저 그릴 «지난번에 받은 값» (1.3.6).
+   칠판에 따라 앱이 다시 켜지는 일이 잦은데, 켤 때마다 설정·급식을 새로 받기 전까지 왼쪽 위가 «3학년 2반»(학교 이름 없음)·
+   자동닫힘 기본 30초·«불러오지 못했어요»로 돌아가 선생님 눈에는 화면이 왔다갔다하고 설정이 안 먹는 것으로 보였다(2026-09-14 제보).
+   · 학교 이름·자동닫힘·테마: 같은 주소·학년·반일 때만 쓴다(다른 시트·다른 반의 값이 섞이지 않게)
+   · 급식·시간표: 거기에 칸마다 «받은 날»이 오늘일 때만 — 어제 급식(알레르기)을 오늘 것으로 보여 주지 않는다.
+     저장하는 날 하나만 붙이면 자정 뒤 급식은 실패·시간표만 성공한 순간 어제 급식이 오늘 날짜로 저장됐다(1.3.6 검수) */
+var BOARD_CACHE_KEY = 'yc_board_cache', DAY_CACHE_KEY = 'yc_day_cache';
+function cacheScope() { var s = SETTINGS || {}; return String(s.webAppUrl || '') + '|' + s.grade + '|' + s.classNum; }
+// 자동닫힘으로 쓸 수 있는 값 — 받을 때와 켤 때 같은 기준(다르면 켤 때 30초·받은 뒤 다른 값으로 다시 왔다갔다한다)
+function validDismiss(v) { return typeof v === 'number' && v >= 5 && v <= 3600; }
+// 자동닫힘은 받은 값이 아니라 «지금 쓰는 값»을 적는다 — 받지 않은 범위 밖 값(예: 5000초)을 적으면 다음에 켤 때 그 값을 버리고 30초로 돌아갔다
+function saveBoardCache(b) {
+  try { localStorage.setItem(BOARD_CACHE_KEY, JSON.stringify({ scope: cacheScope(), schoolName: String(b.schoolName || ''), autoDismiss: autoDismissSec, theme: b.theme })); } catch (e) { /* 저장 못 해도 화면은 그대로 */ }
+}
+function applyStoredBoard() {
+  var s = SETTINGS, badge = s.grade + '학년 ' + s.classNum + '반';
+  try {
+    var c = JSON.parse(localStorage.getItem(BOARD_CACHE_KEY) || 'null');
+    if (c && c.scope === cacheScope()) {
+      if (c.schoolName) badge = c.schoolName + ' ' + badge;
+      if (validDismiss(c.autoDismiss)) autoDismissSec = c.autoDismiss;
+      if (c.theme) document.documentElement.setAttribute('data-theme', String(c.theme));
+      boardFromCache = true;   // 자동닫힘을 이미 채웠으니 board를 기다리지 않고 호출 확인을 시작해도 된다(startPolling)
+    }
+  } catch (e) { /* 깨진 저장값이면 학년·반만 */ }
+  document.getElementById('sBadge').textContent = badge;
+}
+function saveDayCache() {
+  try {
+    localStorage.setItem(DAY_CACHE_KEY, JSON.stringify({ scope: cacheScope(),
+      meal: lastMeal, mealDay: lastMealDay, today: lastToday, todayDay: lastTodayDay, week: lastWeek, weekDay: lastWeekDay }));
+  } catch (e) { /* 저장 못 해도 화면은 그대로 */ }
+}
+function loadDayCache() {
+  try {
+    var c = JSON.parse(localStorage.getItem(DAY_CACHE_KEY) || 'null');
+    if (!c || c.scope !== cacheScope()) return;
+    var day = ymdKey(new Date()), d = {}, any = false;
+    if (c.mealDay === day && Array.isArray(c.meal)) { lastMeal = c.meal; lastMealDay = day; d.meal = lastMeal; any = true; }
+    if (c.todayDay === day && Array.isArray(c.today)) { lastToday = c.today; lastTodayDay = day; d.todayTimetable = lastToday; any = true; }
+    if (c.weekDay === day && c.week && typeof c.week === 'object' && !Array.isArray(c.week)) { lastWeek = c.week; lastWeekDay = day; d.weekTimetable = lastWeek; any = true; }
+    if (any) onBoardData(d);   // 오늘 받은 칸만 그린다 — 없는 칸은 «불러오는 중»으로 두고 곧 받는다
+  } catch (e) { /* 깨진 저장값이면 새로 받는다 */ }
+}
 
 // 학년·반이 숫자 모양이 아니면(고칠 수 없는 옛 저장값) 설정 전으로 본다 — 그대로 돌면 호출이 조용히 안 온다.
 function isConfigured() { return !!(SETTINGS.webAppUrl && normalizeClassNo(SETTINGS.grade) && normalizeClassNo(SETTINGS.classNum)); }
@@ -214,10 +264,31 @@ function isConfigured() { return !!(SETTINGS.webAppUrl && normalizeClassNo(SETTI
 // (A) 공지/설정 — getBoard만. 자주(BOARD_REFRESH_MS) 돈다. 렌더러엔 board만 실어 보낸다(부분 업데이트).
 async function refreshBoard() {
   if (!isConfigured()) return;
+  if (boardRetryTimer) { clearTimeout(boardRetryTimer); boardRetryTimer = null; }   // 3분 주기가 먼저 돌면 15초 예약은 겹치지 않게 지운다
   var s = SETTINGS;
   var board = await api.getBoard(s.webAppUrl, s.grade, s.classNum);
-  if (board.ok && board.data && typeof board.data.autoDismiss === 'number') autoDismissSec = board.data.autoDismiss;
-  if (board.ok) onBoardData({ board: board.data });
+  var d = board.ok ? board.data : null;
+  // 200이어도 목록·오류 답({ok:false,msg})은 받은 것으로 치지 않는다 — 오류 답을 받아들이면 기억해 둔 학교 이름을 빈 값으로 덮었다(1.3.6 검수)
+  if (!(d && typeof d === 'object' && !Array.isArray(d) && d.ok !== false)) {
+    // 한 번도 못 받았으면 받을 때까지 30초부터 늘려 가며 다시. 받은 적이 있으면 화면을 그대로 두고 3분 주기를 기다린다.
+    if (!boardEverOk && !boardRetryTimer) {
+      boardFails++;
+      boardRetryTimer = setTimeout(function () { boardRetryTimer = null; refreshBoard(); }, boardRetryDelayMs(boardFails));
+    }
+    return;
+  }
+  // 겹쳐 돈 재시도가 먼저 실패해 걸어 둔 예약이 있으면 지운다(받았으니 헛요청)
+  if (boardRetryTimer) { clearTimeout(boardRetryTimer); boardRetryTimer = null; }
+  boardEverOk = true; boardFails = 0;
+  if (validDismiss(d.autoDismiss)) autoDismissSec = d.autoDismiss;
+  saveBoardCache(d);
+  onBoardData({ board: d });
+}
+// board 재시도 간격 — 30초·1분·2분·3분(상한) + 칠판마다 0~10초
+function boardRetryDelayMs(fails) {
+  var d = BOARD_RETRY_MS;
+  for (var i = 1; i < fails && d < BOARD_RETRY_MAX_MS; i++) d *= 2;
+  return Math.min(d, BOARD_RETRY_MAX_MS) + Math.floor(Math.random() * 10000);
 }
 
 // (B) 급식/시간표 — getMeal + getTimetable(today/week). 드물게(MEAL_REFRESH_MS) 돈다.
@@ -226,6 +297,7 @@ async function refreshMeal() {
   if (!isConfigured()) return;
   if (mealRetryTimer) { clearTimeout(mealRetryTimer); mealRetryTimer = null; }
   var s = SETTINGS;
+  var dayBefore = ymdKey(new Date());
   // 셋을 한꺼번에 보내지 않고 차례로 — 칠판을 켤 때·30분마다 한 대가 서버 실행을 서너 개씩 동시에 잡지 않게(1.3.4).
   // 셋을 합친 주소는 옛 사본 시트에 없어서, 요청 수는 그대로 두고 겹침만 없앤다.
   var meal = await api.getMeal(s.webAppUrl);
@@ -234,13 +306,20 @@ async function refreshMeal() {
   // 급식·시간표 모두 모양까지 본다 — 급식은 배열, 오늘은 배열, 이번 주는 {날짜: [...]} 객체. 200 응답이라도 모양이 다르면
   // 받은 것으로 치지 않는다(직전값 유지 + 재시도). 한 번도 못 받았으면 null이 그대로 가서 «못 받음»으로 그려진다.
   // (급식은 1.3.4까지 ok만 봐서, 목록이 아닌 답이 직전 급식을 덮었다 — 1.3.5)
-  var mealOk = meal.ok && Array.isArray(meal.data);
-  var todayOk = today.ok && Array.isArray(today.data);
-  var weekOk = week.ok && !!week.data && typeof week.data === 'object' && !Array.isArray(week.data);
-  if (mealOk) lastMeal = meal.data;   // 실패면 직전값 유지(빈값으로 덮지 않음)
-  if (todayOk) lastToday = today.data;
-  if (weekOk) lastWeek = week.data;
+  // 받는 사이 자정을 넘겼으면 어느 날 것인지 알 수 없다 — 받은 것으로 치지 않고 곧 다시 받는다(1.3.6 검수)
+  var day = ymdKey(new Date()), sameDay = day === dayBefore;
+  var mealOk = sameDay && meal.ok && Array.isArray(meal.data);
+  var todayOk = sameDay && today.ok && Array.isArray(today.data);
+  var weekOk = sameDay && week.ok && !!week.data && typeof week.data === 'object' && !Array.isArray(week.data);
+  // 날짜가 바뀌었으면 어제 받은 값은 직전값으로 쓰지 않는다 — 자정 뒤 실패하면 어제 급식(알레르기)을 오늘 것으로 보여 줬다(1.3.6 검수)
+  if (lastMealDay !== day) { lastMeal = null; lastMealDay = ''; }
+  if (lastTodayDay !== day) { lastToday = null; lastTodayDay = ''; }
+  if (lastWeekDay !== day) { lastWeek = null; lastWeekDay = ''; }
+  if (mealOk) { lastMeal = meal.data; lastMealDay = day; }   // 실패면 직전값 유지(빈값으로 덮지 않음)
+  if (todayOk) { lastToday = today.data; lastTodayDay = day; }
+  if (weekOk) { lastWeek = week.data; lastWeekDay = day; }
   onBoardData({ meal: lastMeal, todayTimetable: lastToday, weekTimetable: lastWeek });
+  if (mealOk || todayOk || weekOk) saveDayCache();   // 앱이 다시 켜져도 같은 날이면 곧바로 그린다
   if (!mealOk || !todayOk || !weekOk) {
     if (mealRetryTimer) clearTimeout(mealRetryTimer);
     mealRetryTimer = setTimeout(refreshMeal, MEAL_RETRY_MS);
@@ -263,9 +342,9 @@ function confirmWithRetry(webAppUrl, row, grade, classNum, attempt) {
 
 function nativePrefs() { return window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.Preferences; }
 function pollDelayMs(baseMs, fails) {
-  if (!(fails > 0)) return baseMs;
+  if (!(fails > POLL_GRACE_FAILS)) return baseMs;
   var d = baseMs;
-  for (var i = 0; i < fails && d < POLL_MAX_MS; i++) d *= 2;
+  for (var i = POLL_GRACE_FAILS; i < fails && d < POLL_MAX_MS; i++) d *= 2;
   return Math.min(d, POLL_MAX_MS);
 }
 // 3초마다(요청을 쉬는 차례에도) 적는다 — 서비스는 7초 넘게 소식이 없으면 화면이 멈춘 것으로 보고 다시 묻는다.
@@ -352,12 +431,13 @@ function startPolling() {
   if (boardTimer) clearInterval(boardTimer);
   if (mealTimer) clearInterval(mealTimer);
   if (mealRetryTimer) { clearTimeout(mealRetryTimer); mealRetryTimer = null; }
+  if (boardRetryTimer) { clearTimeout(boardRetryTimer); boardRetryTimer = null; }
   // 시정(periodConfig)이 board에 실려 오므로 board를 먼저 받고 급식/시간표를 그린다 —
   // 거꾸로면 첫 시간표가 기본 시정(4교시 뒤 점심)으로 그려져 다음 갱신(최대 30분)까지 틀린 칸이 보였다.
   // autoDismissSec도 board에서 채워야 첫 알림부터 정확한 카운트다운이 된다.
   // board가 실패하거나 그리다 예외가 나도 폴링은 시작해야 한다 — then의 두 갈래에 같은 함수를 건다.
-  function afterBoard() {
-    refreshMeal(); // 급식/시간표도 시작 즉시 1회 로드 — 설치 직후 30분 기다리지 않게
+  function afterBoard(withMeal) {
+    if (withMeal !== false) refreshMeal(); // 급식/시간표도 시작 즉시 1회 로드 — 설치 직후 30분 기다리지 않게
     tick();
     // 같은 시각에 켠 칠판들이 3초마다·3분마다·30분마다 같은 순간에 서버로 몰리지 않게 칠판마다 박자를 흩뜨린다(1.3.4).
     // 첫 확인은 곧바로 하고, 3초 박자의 시작만 0~3초 늦춘다 — 호출이 뜨는 속도는 그대로다.
@@ -369,7 +449,14 @@ function startPolling() {
     boardTimer = setInterval(refreshBoard, BOARD_REFRESH_MS + Math.floor(Math.random() * 20000));
     mealTimer = setInterval(refreshMeal, MEAL_REFRESH_MS + Math.floor(Math.random() * 120000));
   }
-  refreshBoard().then(afterBoard, afterBoard);
+  // 지난번에 받은 자동닫힘·시정을 이미 적용했으면(applyStoredBoard) board를 기다리지 않고 곧바로 시작한다 —
+  // 칠판에서 앱이 다시 켜질 때 서버가 느리면 첫 호출 확인이 board 시간 초과(8초)만큼 늦었다(1.3.6 검수)
+  // 이때도 급식·시간표는 board 뒤로 미룬다 — 오늘 받은 값은 이미 그려 두었고(loadDayCache), 켜는 순간 board·급식·호출 셋이 한꺼번에 나가면
+  // 반마다 칠판이 같이 다시 켜질 때(정전·일괄 재부팅) 서버 동시 실행이 1.5배가 된다(1.3.6 재검수)
+  if (boardFromCache) {
+    refreshBoard().then(refreshMeal, refreshMeal).catch(function () { });
+    afterBoard(false);
+  } else refreshBoard().then(afterBoard, afterBoard);
 }
 
 /* ===== 오디오 (원본과 동일한 사운드 8종) ===== */
@@ -1206,11 +1293,12 @@ window.addEventListener('DOMContentLoaded', function () {
     }, 4000);
   });
 
-  document.getElementById('sBadge').textContent = SETTINGS.grade + '학년 ' + SETTINGS.classNum + '반';
+  applyStoredBoard();         // 왼쪽 위·자동닫힘·테마를 지난번 값으로 먼저(같은 주소·반일 때) — 다시 켜질 때 «학년 반»·30초로 돌아가지 않게
   loadStoredPeriodConfig();   // 지난번에 받은 시정을 먼저 — board가 늦거나 실패해도 기본 시정(4교시 뒤 점심)으로 그리지 않게
   SCHEDULE = buildSchedule(PERIOD_CONFIG);
   startClock();
   showStandby();
+  loadDayCache();             // 오늘 이미 받은 급식·시간표가 있으면 곧바로 그린다(시정을 정한 뒤)
 
   ['touchstart', 'mousedown', 'keydown'].forEach(function (ev) {
     document.addEventListener(ev, function h() {

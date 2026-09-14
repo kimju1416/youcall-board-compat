@@ -28,11 +28,17 @@ final class PollGate {
         return age >= 0 && age < WEB_ALIVE_MS;
     }
 
-    /** 다음 차례까지 기다릴 시간. 실패가 없으면 기본 간격, n번 이어지면 기본×2ⁿ(상한 15초). app.js pollDelayMs와 같은 규칙. */
+    /**
+     * 이 횟수까지의 실패는 물러나지 않는다(1.3.6). 한 번만 실패해도 물러나면 서버가 «가끔» 실패하는 학교에서 호출이 늦게 떴다
+     * (실측: 실패 20%에서 10번 중 9번이 뜨는 시간 4.1초 → 9.0초). 한도에 걸려 계속 실패하면 세 번째부터 물러난다.
+     */
+    static final int GRACE_FAILS = 2;
+
+    /** 다음 차례까지 기다릴 시간. 실패가 GRACE_FAILS 이하면 기본 간격, 그 뒤로는 기본×2ⁿ(상한 15초). app.js pollDelayMs와 같은 규칙. */
     static long nextDelayMs(long baseMs, int failStreak) {
-        if (failStreak <= 0) return baseMs;
+        if (failStreak <= GRACE_FAILS) return baseMs;
         long d = baseMs;
-        for (int i = 0; i < failStreak && d < MAX_DELAY_MS; i++) d *= 2;
+        for (int i = GRACE_FAILS; i < failStreak && d < MAX_DELAY_MS; i++) d *= 2;
         return Math.min(d, MAX_DELAY_MS);
     }
 

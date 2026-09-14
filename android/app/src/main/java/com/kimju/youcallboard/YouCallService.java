@@ -57,7 +57,7 @@ public class YouCallService extends Service {
     private static final String KEY_WEB_POLL = "yc_web_poll";        // 화면이 호출을 묻고 있는 마지막 시각
     private static final String KEY_WEB_ALERTED = "yc_web_alerted";  // 화면이 띄운 호출 "행:시각,행:시각"
     private static final String KEY_SVC_YIELD = "yc_svc_yield";      // 서비스가 화면에 맡기고 쉰 마지막 시각(「뒤 감시」 표시용)
-    /** 이어진 실패 수. 서버가 한도에 걸렸을 때 2초마다 두드리지 않고 4·8·15초로 늘린다(PollGate.nextDelayMs). */
+    /** 이어진 실패 수. 서버가 한도에 걸렸을 때 2초마다 두드리지 않고 세 번째 실패부터 4·8·15초로 늘린다(PollGate.nextDelayMs). */
     private volatile int failStreak = 0;
     /**
      * 실패가 이어져 물러난 동안 다음에 물어도 되는 때(부팅 뒤 흐른 시간 — 벽시계를 바꿔도 안 틀어진다). 0이면 곧바로.
@@ -345,7 +345,7 @@ public class YouCallService extends Service {
     }
 
     /**
-     * 실패를 하나 세고, 다음에 물어도 되는 때를 늦춘다(4→8→15초). 박자는 그대로라 성공하면 곧바로 2초로 돌아온다.
+     * 실패를 하나 세고, 다음에 물어도 되는 때를 늦춘다(두 번째까지는 2초 그대로, 그 뒤 4→8→15초). 박자는 그대로라 성공하면 곧바로 2초로 돌아온다.
      * 실패가 «끝난» 때부터 잰다 — 보낸 때부터 재면 8초 시간 초과 뒤 곧바로 다시 보내 물러나기가 헛돈다(1.3.4 검수).
      * 벽시계가 아니라 부팅 뒤 흐른 시간이라 시각을 바꿔도 안 틀어진다.
      */

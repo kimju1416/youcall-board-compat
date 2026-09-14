@@ -39,7 +39,7 @@ let current = 'merged';
 function boardBody() {
   const c = CASES[current];
   return {
-    schoolName: '광평중학교',
+    schoolName: '가상중학교',
     notice: c.notice,
     classMemo: c.classMemo,
     noticeStep: c.noticeStep,
