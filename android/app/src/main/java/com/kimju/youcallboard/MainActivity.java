@@ -45,9 +45,11 @@ public class MainActivity extends BridgeActivity {
         YouCallService.start(this);
 
         // 한 번에 하나만 안내한다(다이얼로그가 겹치면 아무도 안 읽는다).
-        // 화면 꺼짐을 먼저 묻는다 — 화면이 안 꺼지면 절전도 Wi-Fi 끊김도 애초에 안 생긴다.
-        if (!askScreenTimeoutIfNeeded())
-            if (!askOverlayPermissionIfNeeded())
+        // «다른 앱 위에 표시»를 먼저 묻는다 — 기본판이 이렇게 물었고, 호출 화면이 뜨려면 꼭 있어야 하는 권한이다.
+        // 1.1.17~1.3.1은 화면 꺼짐을 먼저 물어서, 거기서 «나중에»를 누르거나 칠판이 그 권한을 막으면
+        // 이 안내가 영영 안 떠 선생님이 권한을 찾지 못했다(2026-09-14 제보). 화면 꺼짐은 그다음에 묻는다.
+        if (!askOverlayPermissionIfNeeded())
+            if (!askScreenTimeoutIfNeeded())
                 askBatteryExemptionIfNeeded();
     }
 
@@ -155,8 +157,8 @@ public class MainActivity extends BridgeActivity {
             .setMessage(
                 "다른 화면(수업자료·인터넷 등)을 보고 있을 때도 호출이 자동으로 뜨게 하려면\n"
                     + "'다른 앱 위에 표시' 권한을 켜야 합니다.\n\n"
-                    + "설정 열기 → 유콜 보드 → 허용으로 바꿔주세요.\n"
-                    + "(켜지 않아도 호출 알림은 화면 위쪽에 표시됩니다)"
+                    + "설정 열기 → 목록에서 「유콜 보드 (호환)」 → 허용으로 바꿔주세요.\n"
+                    + "(켜지 않으면 다른 화면을 보는 동안에는 호출 화면이 뜨지 않고 소리로만 알려 드립니다)"
             )
             .setPositiveButton("설정 열기", (d, w) -> {
                 try {

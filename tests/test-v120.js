@@ -486,6 +486,55 @@ if (FLAVOR === 'compat') {
     const md = fs.readFileSync(path.join(ROOT, 'README.md'), 'utf8');
     ok(md.indexOf('기본판과 **내용이 동일**') < 0, 'README 171행 문구가 그대로다');
   });
+
+  /* 2026-09-14 제보 — 기본판에서 옮긴 칠판이 «다른 앱 위에 표시 권한이 없어졌다»·«설정 안 한 소리가 더 난다».
+     기본판의 동작(겹쳐 띄우기 안내가 먼저·호출 채널 무음·서비스는 소리 안 냄)을 기본값으로 되살렸는지 잰다. */
+  const MAIN_SRC = fs.readFileSync(path.join(path.dirname(JAVA), 'MainActivity.java'), 'utf8').replace(/\r\n/g, '\n');
+  check('C-3 첫 실행 안내는 «다른 앱 위에 표시»를 먼저 묻는다(화면 꺼짐 안내에 막히지 않게)', () => {
+    ok(/if \(!askOverlayPermissionIfNeeded\(\)\)\s*if \(!askScreenTimeoutIfNeeded\(\)\)\s*askBatteryExemptionIfNeeded\(\);/.test(MAIN_SRC), '안내 순서가 겹쳐 띄우기 → 화면 꺼짐 → 절전 제외가 아니다');
+    ok(MAIN_SRC.indexOf('켜지 않아도 호출 알림은 화면 위쪽에 표시') < 0, '«알림은 뜬다»는 옛 문구가 남아 있다');
+    ok(MAIN_SRC.indexOf('「유콜 보드 (호환)」') >= 0, '안내창에 이 앱 이름이 없다');
+  });
+  check('C-4 서비스는 앱이 앞에 없다고 곧바로 알람을 울리지 않는다 — 기다렸다가 화면도 웹 소리도 없을 때만', () => {
+    ok(!/if \(!MainActivity\.inForeground\) playAlarmOnce\(\);/.test(JSRC), '곧바로 울리던 1.3.1 코드가 남아 있다');
+    const at = JSRC.indexOf('private void bringAppToFront(');
+    ok(at >= 0, 'bringAppToFront가 없다');
+    const body = JSRC.slice(at, JSRC.indexOf('\n    }\n', at));
+    const d = body.indexOf('postDelayed(new Runnable()', body.indexOf('FALLBACK') >= 0 ? 0 : 0);
+    const alarm = body.lastIndexOf('playAlarmOnce()');
+    ok(alarm > 0, '대체 알람(playAlarmOnce) 자체가 사라졌다 — HDMI 칠판 대응은 남겨야 한다');
+    const tail = body.slice(body.lastIndexOf('postDelayed(', alarm), alarm);
+    ok(/FALLBACK_CHECK_MS/.test(body.slice(alarm)), '알람이 기다린 뒤(FALLBACK_CHECK_MS)에 울리지 않는다');
+    ok(/MainActivity\.inForeground/.test(tail) && /webSounded\(row/.test(tail), '울리기 전에 화면·웹 소리를 확인하지 않는다');
+    ok(d >= 0, '지연 실행이 없다');
+    ok(/bringAppToFront\(row, /.test(JSRC), '호출 행 번호를 넘기지 않는다');
+  });
+  check('C-5 호출 알림 채널은 무음 새 채널 · 알람음이 박힌 옛 채널은 지운다', () => {
+    const m = JSRC.match(/String CH_CALL = "([^"]+)"/);
+    ok(m && m[1] !== 'youcall_call', '채널 id가 옛것 그대로다(이미 깔린 칠판은 소리가 안 바뀐다): ' + (m && m[1]));
+    ok(/deleteNotificationChannel\(CH_CALL_OLD\)/.test(JSRC) && /CH_CALL_OLD = "youcall_call"/.test(JSRC), '옛 채널을 지우지 않는다');
+    ok(/call\.setSound\(null, null\)/.test(JSRC), '호출 채널이 무음이 아니다');
+    ok(!/call\.setSound\(alarm/.test(JSRC), '호출 채널에 알람음이 남아 있다');
+  });
+  check('C-6 웹은 소리를 낼 수 있을 때만 «소리 냈음»을 적고, 서비스와 같은 키·형식을 쓴다', () => {
+    const sets = [];
+    const P = { set(o) { sets.push(o); return Promise.resolve(); } };
+    const c = sandbox(['markSoundedForNative'], { globals: { window: { Capacitor: { Plugins: { Preferences: P } } }, audioCtx: { state: 'running' } } });
+    vm.runInContext('__NOW = 1789000000000', c);
+    ok(c.markSoundedForNative(12) === true && sets.length === 1, '소리가 나는 상태인데 안 적었다');
+    same(sets[0], { key: 'yc_sounded', value: '12:1789000000000' }, '적은 값');
+    c.audioCtx = { state: 'suspended' };
+    ok(c.markSoundedForNative(13) === false && sets.length === 1, '소리가 막힌 상태(suspended)인데 적었다 — 서비스가 대신 울리지 못한다');
+    c.audioCtx = null;
+    ok(c.markSoundedForNative(14) === false && sets.length === 1, 'AudioContext가 없는데 적었다');
+    c.audioCtx = { state: 'running' };
+    ok(c.markSoundedForNative(null) === false && sets.length === 1, '행 번호 없이 적었다');
+    c.window = {};
+    ok(c.markSoundedForNative(15) === false, '앱 밖(Capacitor 없음)에서 터지거나 적었다');
+    ok(/KEY_SOUNDED = "yc_sounded"/.test(JSRC) && /indexOf\(':'\)/.test(JSRC), '서비스가 같은 키·«행:시각» 형식을 읽지 않는다');
+    ok(/playAlertNTimes\([^\n]*call\.row\)/.test(fn('showAlert')), '호출 화면이 행 번호를 소리 재생에 넘기지 않는다');
+    ok(/if \(i === 0\) markSoundedForNative\(row\)/.test(fn('playAlertNTimes')), '첫 호출음 뒤에 표시를 적지 않는다');
+  });
 }
 
 /* ---------- 실행 ---------- */

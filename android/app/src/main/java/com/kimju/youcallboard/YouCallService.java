@@ -40,7 +40,14 @@ public class YouCallService extends Service {
 
     private static final String TAG = "YouCallService";
     private static final String CH_ONGOING = "youcall_ongoing";  // 상주(트레이) 알림
-    private static final String CH_CALL = "youcall_call";        // 호출 알림(전체화면 인텐트)
+    // 호출 알림(전체화면 인텐트). 1.3.2부터 무음 채널이다 — 채널 소리는 한 번 만들면 앱이 못 바꾸므로
+    // id를 새로 두고, 알람음이 박혀 있던 옛 채널(1.1.17~1.3.1)은 지운다.
+    private static final String CH_CALL = "youcall_call_silent";
+    private static final String CH_CALL_OLD = "youcall_call";
+    // 웹(app.js markSoundedForNative)이 «이 호출은 화면이 소리를 냈다»고 적는 자리. 형식 "행번호:시각".
+    private static final String KEY_SOUNDED = "yc_sounded";
+    // 화면이 뜨거나 웹이 소리를 냈는지 기다리는 시간. 웹 폴링 3초 + 서버 응답 2~3초를 넉넉히 덮는다.
+    private static final long FALLBACK_CHECK_MS = 8000L;
     private static final int NOTI_ONGOING = 1;
     private static final int NOTI_CALL = 2;
     private static final long POLL_MS = 2000L;
@@ -246,7 +253,7 @@ public class YouCallService extends Service {
                 String num = c.optString("num", "");
                 String teacher = c.optString("teacher", "");
                 String message = c.optString("message", "");
-                bringAppToFront(num, name, teacher, message);
+                bringAppToFront(row, num, name, teacher, message);
                 break;
             }
         } catch (Exception e) {
@@ -364,7 +371,7 @@ public class YouCallService extends Service {
     }
 
     /** 호출이 왔을 때 앱을 화면 앞으로. 권한이 있으면 즉시 띄우고, 없으면 전체화면 인텐트 알림으로 대체한다. */
-    private void bringAppToFront(String num, String name, String teacher, String message) {
+    private void bringAppToFront(final int row, String num, String name, String teacher, String message) {
         final Intent open = new Intent(this, MainActivity.class);
         open.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
 
@@ -420,9 +427,39 @@ public class YouCallService extends Service {
             try { startActivity(open); } catch (Exception e) { Log.w(TAG, "startActivity 실패: " + e.getMessage()); }
         }
 
-        // 화면이 떠 있으면 웹이 사용자가 고른 호출음을 낸다 — 그때는 겹치지 않게 조용히 있는다.
-        // 화면을 못 띄우는 상황(HDMI 입력 중 등)에서만 서비스가 직접 울린다. 그때는 소리가 유일한 알림이다.
-        if (!MainActivity.inForeground) playAlarmOnce();
+        // 소리는 기본판처럼 «화면(웹)이 사용자가 고른 호출음»으로 낸다. 서비스는 끼어들지 않는다.
+        // 다만 HDMI를 보는 칠판처럼 화면도 못 뜨고 웹도 소리를 못 낸 경우엔 알릴 길이 소리뿐이라,
+        // 잠시 기다려 둘 다 아니었을 때만 기기 알람음을 대신 울린다(09-03 HDMI 제보 대응을 물러설 자리로 남긴다).
+        // 1.1.17~1.3.1은 앱이 앞에 없으면 곧바로 울려서, 화면이 잘 뜨는 칠판이나 뒤에서 웹이 음성을 내는
+        // 칠판에서도 «설정하지 않은 소리»가 호출음 위에 겹쳤다(2026-09-14 제보).
+        if (!MainActivity.inForeground) {
+            final long detectedAt = System.currentTimeMillis();
+            handler.postDelayed(new Runnable() {
+                @Override public void run() {
+                    if (MainActivity.inForeground) { Log.i(TAG, "대체 알람 생략 — 화면이 떴다 (row " + row + ")"); return; }
+                    if (webSounded(row, detectedAt)) { Log.i(TAG, "대체 알람 생략 — 웹이 소리를 냈다 (row " + row + ")"); return; }
+                    Log.i(TAG, "대체 알람 울림 — 화면도 웹 소리도 없었다 (row " + row + ")");
+                    playAlarmOnce();
+                }
+            }, FALLBACK_CHECK_MS);
+        }
+    }
+
+    /**
+     * 웹(app.js markSoundedForNative)이 이 호출에 소리를 냈다고 적었는지. 값 형식은 "행번호:시각".
+     * 웹은 서비스보다 먼저 호출을 알아챌 수도 있으므로 감지 1분 전까지의 표시는 믿는다. 그보다 오래된 것은 다른 호출이다.
+     * Capacitor Preferences는 같은 프로세스의 같은 SharedPreferences("CapacitorStorage")에 쓰므로 바로 읽힌다.
+     */
+    private boolean webSounded(int row, long detectedAt) {
+        try {
+            String v = getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE).getString(KEY_SOUNDED, null);
+            if (v == null) return false;
+            int c = v.indexOf(':');
+            if (c <= 0) return false;
+            int r = Integer.parseInt(v.substring(0, c).trim());
+            long at = Long.parseLong(v.substring(c + 1).trim());
+            return r == row && at >= detectedAt - 60_000L;
+        } catch (Exception e) { return false; }
     }
 
     /**
@@ -522,21 +559,17 @@ public class YouCallService extends Service {
         ongoing.setShowBadge(false);
         nm.createNotificationChannel(ongoing);
 
+        // 1.1.17~1.3.1이 쓰던 채널에는 알람음이 박혀 있다. 채널 소리는 앱이 못 바꾸므로 지우고 새 채널로 옮긴다
+        // (남겨 두면 설정 앱에 «학생 호출»이 둘 보이고, 옛 판 칠판에서는 알람이 계속 겹친다).
+        try { nm.deleteNotificationChannel(CH_CALL_OLD); } catch (Exception e) { Log.w(TAG, "옛 호출 채널 삭제 실패: " + e.getMessage()); }
+
         NotificationChannel call = new NotificationChannel(CH_CALL, "학생 호출", NotificationManager.IMPORTANCE_HIGH);
         call.setDescription("교무실에서 학생을 호출했을 때 화면을 띄운다");
         call.enableVibration(false);
-        // 예전에는 여기서 소리를 껐다(setSound(null, null)) — "소리는 화면에 뜬 앱이 낸다"는 전제였다.
-        // 그런데 HDMI(노트북·중앙방송)를 보고 있으면 앱이 화면에 못 떠서 **소리도 안 난다**(실제 제보).
-        // 화면을 못 띄우는 상황일수록 소리가 유일한 알림이므로, 알람 속성으로 직접 울린다.
-        try {
-            android.net.Uri alarm = android.media.RingtoneManager.getDefaultUri(android.media.RingtoneManager.TYPE_ALARM);
-            if (alarm == null) alarm = android.media.RingtoneManager.getDefaultUri(android.media.RingtoneManager.TYPE_NOTIFICATION);
-            android.media.AudioAttributes attrs = new android.media.AudioAttributes.Builder()
-                .setUsage(android.media.AudioAttributes.USAGE_ALARM)
-                .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                .build();
-            call.setSound(alarm, attrs);
-        } catch (Exception e) { Log.w(TAG, "호출음 채널 설정 실패: " + e.getMessage()); }
+        // 기본판처럼 무음. 소리는 화면(웹)이 사용자가 고른 호출음으로 낸다.
+        // 09-03 HDMI 제보 때 여기 알람음을 넣었더니, 화면이 잘 뜨는 칠판에서도 호출음 위에 알람이 겹쳤다(2026-09-14 제보).
+        // HDMI처럼 화면도 웹 소리도 없을 때의 알람은 서비스가 기다렸다가 대신 울린다(bringAppToFront).
+        call.setSound(null, null);
         nm.createNotificationChannel(call);
     }
 

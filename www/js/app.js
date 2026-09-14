@@ -359,7 +359,19 @@ function speakAsync(text, myToken) {
   });
 }
 function wait(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
-function playAlertNTimes(text, count) {
+/* 상주 서비스에 «이 호출은 화면(웹)이 소리를 냈다»고 적는다. 서비스는 이 표시가 없고 화면도 못 떴을 때만
+   기기 알람음을 대신 울린다(YouCallService.bringAppToFront). 1.3.1까지는 앱이 앞에 없으면 무조건 울려서,
+   다른 앱을 쓰는 중에 설정한 호출음 위로 알람이 겹쳤다(2026-09-14 제보).
+   소리가 실제로 날 수 있는 상태(AudioContext running)일 때만 적는다 — 막혀 있으면 서비스가 대신 울리게 둔다. */
+function markSoundedForNative(row) {
+  if (row == null || !audioCtx || audioCtx.state !== 'running') return false;
+  var P = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.Preferences;
+  if (!P) return false;
+  try { Promise.resolve(P.set({ key: 'yc_sounded', value: String(row) + ':' + Date.now() })).catch(function () { }); }
+  catch (e) { return false; }
+  return true;
+}
+function playAlertNTimes(text, count, row) {
   _ttsToken++;
   var myToken = _ttsToken;
   (async function () {
@@ -367,6 +379,7 @@ function playAlertNTimes(text, count) {
       if (myToken !== _ttsToken) return;
       playSound(parseInt(document.getElementById('soundSelect').value) || 0, getVol());
       await wait(600);
+      if (i === 0) markSoundedForNative(row);   // 첫 호출음을 낸 뒤 — 그사이 AudioContext가 깨어났는지 보고 적는다
       if (myToken !== _ttsToken) return;
       await speakAsync(text, myToken);
       if (myToken !== _ttsToken) return;
@@ -873,7 +886,7 @@ function showAlert(payload) {
 
   if (_lastAlertRow !== call.row) {
     _lastAlertRow = call.row;
-    playAlertNTimes(call.name + ' 학생 교무실로 오세요', getRepeatCount());
+    playAlertNTimes(call.name + ' 학생 교무실로 오세요', getRepeatCount(), call.row);
   }
 
   if (_alertTicker) clearInterval(_alertTicker);
