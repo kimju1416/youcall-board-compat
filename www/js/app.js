@@ -189,8 +189,18 @@ var api = {
 // BOARD_REFRESH_MS: 공지/설정만 자주(3분). MEAL_REFRESH_MS: 급식/시간표는 드물게(30분).
 // MEAL_RETRY_MS: 급식/시간표 실패 시 30분 안 기다리고 90초 뒤 1회 재시도.
 var POLL_MS = 3000, BOARD_REFRESH_MS = 3 * 60 * 1000, MEAL_REFRESH_MS = 30 * 60 * 1000, MEAL_RETRY_MS = 90 * 1000;
-var pollTimer = null, boardTimer = null, mealTimer = null, mealRetryTimer = null;
+var pollTimer = null, boardTimer = null, mealTimer = null, mealRetryTimer = null, pollStartTimer = null;
 var alertedRows = {}, current = null, autoDismissSec = 30;
+
+/* ===== 서버 부하 줄이기 (1.3.4) =====
+   2026-09-14 18개 반 학교의 «트래픽 오류»: 칠판 한 대가 상주 서비스(2초)와 이 화면(3초) 두 갈래로 서버에 물어
+   18대면 초당 15번, 구글 서버 동시 실행이 30개 안팎이었다.
+   · 이 화면이 묻는 동안 «묻는 중»을 네이티브 저장소에 적는다 → 앱이 앞에 있으면 서비스는 그걸 보고 쉰다(YouCallService·PollGate).
+     앞에 있을 때 호출을 띄우고 소리 내는 건 원래 이 화면이라 호출이 뜨는 속도는 그대로다.
+   · 앞 요청이 안 끝났으면 겹쳐 보내지 않는다 / 실패가 이어지면 3→6→12→15초로 물러났다가 성공하면 3초로 돌아온다.
+   POLL_MAX_MS·물러나는 규칙은 PollGate.nextDelayMs와 같아야 한다(tests/test-v120.js L-3이 대조). */
+var WEB_POLL_KEY = 'yc_web_poll', WEB_ALERTED_KEY = 'yc_web_alerted', SVC_YIELD_KEY = 'yc_svc_yield', POLL_MAX_MS = 15000;
+var pollBusy = false, pollFails = 0, pollNextAt = 0, webAlerted = [];
 
 // 급식/시간표 직전 성공값(last-good) — NEIS 일시 실패 시 빈값으로 덮지 않고 이 값을 유지한다.
 // 시간표는 처음에 null(아직 못 받음)이다 — []·{}로 두면 «받았는데 비었음»과 구분이 안 돼
@@ -215,12 +225,11 @@ async function refreshMeal() {
   if (!isConfigured()) return;
   if (mealRetryTimer) { clearTimeout(mealRetryTimer); mealRetryTimer = null; }
   var s = SETTINGS;
-  var results = await Promise.all([
-    api.getMeal(s.webAppUrl),
-    api.getTimetable(s.webAppUrl, s.grade, s.classNum, 'today'),
-    api.getTimetable(s.webAppUrl, s.grade, s.classNum, 'week')
-  ]);
-  var meal = results[0], today = results[1], week = results[2];
+  // 셋을 한꺼번에 보내지 않고 차례로 — 칠판을 켤 때·30분마다 한 대가 서버 실행을 서너 개씩 동시에 잡지 않게(1.3.4).
+  // 셋을 합친 주소는 옛 사본 시트에 없어서, 요청 수는 그대로 두고 겹침만 없앤다.
+  var meal = await api.getMeal(s.webAppUrl);
+  var today = await api.getTimetable(s.webAppUrl, s.grade, s.classNum, 'today');
+  var week = await api.getTimetable(s.webAppUrl, s.grade, s.classNum, 'week');
   if (meal.ok) lastMeal = meal.data;   // 실패면 직전값 유지(빈값으로 덮지 않음)
   // 시간표는 모양까지 본다 — 오늘은 배열, 이번 주는 {날짜: [...]} 객체. 200 응답이라도 모양이 다르면
   // 받은 것으로 치지 않는다(직전값 유지 + 재시도). 한 번도 못 받았으면 null이 그대로 가서 «못 받음»으로 그려진다.
@@ -249,21 +258,76 @@ function confirmWithRetry(webAppUrl, row, grade, classNum, attempt) {
   });
 }
 
+function nativePrefs() { return window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.Preferences; }
+function pollDelayMs(baseMs, fails) {
+  if (!(fails > 0)) return baseMs;
+  var d = baseMs;
+  for (var i = 0; i < fails && d < POLL_MAX_MS; i++) d *= 2;
+  return Math.min(d, POLL_MAX_MS);
+}
+// 3초마다(요청을 쉬는 차례에도) 적는다 — 서비스는 7초 넘게 소식이 없으면 화면이 멈춘 것으로 보고 다시 묻는다.
+function markWebPolling() {
+  var P = nativePrefs();
+  if (!P) return;
+  try { Promise.resolve(P.set({ key: WEB_POLL_KEY, value: String(Date.now()) })).catch(function () { }); } catch (e) { }
+}
+// 이 화면이 띄운 호출을 서비스에 알린다("행:시각" 최근 30개). 서비스는 앱이 앞에 있는 동안 띄운 호출이면
+// 앱이 뒤로 간 뒤에도 새 호출로 보지 않는다 — 쉬는 사이 화면이 띄운 호출로 칠판을 다시 끌어오지 않게.
+function rememberWebAlerted(row) {
+  if (row == null) return;
+  webAlerted = webAlerted.filter(function (x) { return x[0] !== row; }).concat([[row, Date.now()]]).slice(-30);
+  var P = nativePrefs();
+  if (!P) return;
+  var value = webAlerted.map(function (x) { return x[0] + ':' + x[1]; }).join(',');
+  try { Promise.resolve(P.set({ key: WEB_ALERTED_KEY, value: value })).catch(function () { }); } catch (e) { }
+}
+// 켤 때 지난번에 적어 둔 목록을 먼저 읽어 합친다 — 새로고침·앱 재시작 뒤 첫 호출 한 건으로 목록 전체를 덮어쓰지 않게(1.3.4 검수).
+// 읽기가 끝나기 전에 새 호출이 먼저 적혔어도 그 호출은 살린다(같은 행이면 새 것).
+function loadWebAlerted() {
+  var P = nativePrefs();
+  if (!P) return;
+  try {
+    Promise.resolve(P.get({ key: WEB_ALERTED_KEY })).then(function (r) {
+      var stored = String((r && r.value) || '').split(',').map(function (part) {
+        var p = part.split(':');
+        return [parseInt(p[0], 10), parseInt(p[1], 10)];
+      }).filter(function (x) { return x[0] >= 0 && x[1] > 0; });
+      var mine = {};
+      webAlerted.forEach(function (x) { mine[x[0]] = true; });
+      webAlerted = stored.filter(function (x) { return !mine[x[0]]; }).concat(webAlerted).slice(-30);
+    }).catch(function () { });
+  } catch (e) { }
+}
+
 async function tick() {
   if (!isConfigured()) return;
   var s = SETTINGS;
+  markWebPolling();
   if (current && Date.now() >= current.deadlineAt) {
     confirmWithRetry(s.webAppUrl, current.row, s.grade, s.classNum);   // 기다리지 않는다 — 폴링은 그대로 돈다
-    current = null;
+    current = null;   // 호출 화면은 다음 응답을 받고 닫는다(1.3.3과 같게) — 먼저 닫으면 상주형이 내려가 대기 중인 다음 호출이 뒤에서 뜬다
   }
-  var res = await api.getCalls(s.webAppUrl, s.grade, s.classNum);
-  if (!res.ok) return;
+  // 시계가 뒤로 가면(시각 자동 맞춤 등) 물러날 시각이 몇 시간 뒤로 밀려 이 화면은 묻지 않는데 «묻는 중»은 계속 적혀
+  // 서비스까지 쉬게 된다 — 상한(15초)보다 먼 예약은 틀린 값으로 보고 지운다(1.3.4 검수).
+  if (pollNextAt && pollNextAt - Date.now() > POLL_MAX_MS + 1000) pollNextAt = 0;
+  // 앞 요청이 아직이면 겹쳐 보내지 않는다(느린 서버에 요청이 쌓인다) / 실패가 이어져 물러난 중이면 이번 차례는 쉰다(0.5초는 타이머 오차)
+  if (pollBusy || (pollNextAt && Date.now() + 500 < pollNextAt)) return;
+  pollBusy = true;
+  var res;
+  try { res = await api.getCalls(s.webAppUrl, s.grade, s.classNum); }
+  finally { pollBusy = false; }
+  // 목록(배열)이 아닌 답도 실패로 센다 — 서비스(JSONArray로 못 읽으면 실패)와 같은 기준.
+  // 물러날 시각은 응답이 «끝난» 때부터 — 보낸 때부터 재면 8초 시간 초과 뒤 곧바로 다시 보내 물러나기가 헛돈다(1.3.4 검수).
+  if (res && res.ok && Array.isArray(res.data)) { pollFails = 0; pollNextAt = 0; }
+  else { pollFails++; pollNextAt = Date.now() + pollDelayMs(POLL_MS, pollFails); }
+  if (!res || !res.ok) return;
   var calls = Array.isArray(res.data) ? res.data : [];
   if (!current) {
     var fresh = null;
     for (var i = 0; i < calls.length; i++) { if (!alertedRows[calls[i].row]) { fresh = calls[i]; break; } }
     if (fresh) {
       alertedRows[fresh.row] = true;
+      rememberWebAlerted(fresh.row);
       current = Object.assign({}, fresh, { deadlineAt: Date.now() + autoDismissSec * 1000, totalSec: autoDismissSec });
       var queueCount = calls.filter(function (c) { return c.row !== fresh.row; }).length;
       showAlert({ call: current, queueCount: queueCount });
@@ -281,6 +345,7 @@ async function tick() {
 
 function startPolling() {
   if (pollTimer) clearInterval(pollTimer);
+  if (pollStartTimer) { clearTimeout(pollStartTimer); pollStartTimer = null; }
   if (boardTimer) clearInterval(boardTimer);
   if (mealTimer) clearInterval(mealTimer);
   if (mealRetryTimer) { clearTimeout(mealRetryTimer); mealRetryTimer = null; }
@@ -291,9 +356,15 @@ function startPolling() {
   function afterBoard() {
     refreshMeal(); // 급식/시간표도 시작 즉시 1회 로드 — 설치 직후 30분 기다리지 않게
     tick();
-    pollTimer = setInterval(tick, POLL_MS);
-    boardTimer = setInterval(refreshBoard, BOARD_REFRESH_MS);
-    mealTimer = setInterval(refreshMeal, MEAL_REFRESH_MS);
+    // 같은 시각에 켠 칠판들이 3초마다·3분마다·30분마다 같은 순간에 서버로 몰리지 않게 칠판마다 박자를 흩뜨린다(1.3.4).
+    // 첫 확인은 곧바로 하고, 3초 박자의 시작만 0~3초 늦춘다 — 호출이 뜨는 속도는 그대로다.
+    pollStartTimer = setTimeout(function () {
+      pollStartTimer = null;
+      tick();   // 박자를 여는 순간에도 한 번 — 첫 확인과 두 번째 사이가 3초를 넘지 않게(서비스는 7초 넘게 소식이 없으면 다시 묻는다)
+      pollTimer = setInterval(tick, POLL_MS);
+    }, Math.floor(Math.random() * POLL_MS));
+    boardTimer = setInterval(refreshBoard, BOARD_REFRESH_MS + Math.floor(Math.random() * 20000));
+    mealTimer = setInterval(refreshMeal, MEAL_REFRESH_MS + Math.floor(Math.random() * 120000));
   }
   refreshBoard().then(afterBoard, afterBoard);
 }
@@ -1002,7 +1073,7 @@ function wireCfgModal() {
 function showLastPollBadge() {
   var P = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.Preferences;
   if (!P) return;
-  function render(ms) {
+  function render(ms, yieldAt) {
     var head = document.querySelector('.hright');
     if (!head) return;
     var el = document.getElementById('pollBadge');
@@ -1018,15 +1089,21 @@ function showLastPollBadge() {
       el.addEventListener('click', showSourceReport);
       head.insertBefore(el, head.firstChild);
     }
-    if (!ms) { el.textContent = '뒤 감시: 기록 없음'; el.style.color = '#b03030'; return; }
-    var sec = Math.max(0, Math.round((Date.now() - ms) / 1000));
+    var sec = ms ? Math.max(0, Math.round((Date.now() - ms) / 1000)) : 0;
     var txt = sec < 90 ? (sec + '초 전') : (Math.round(sec / 60) + '분 전');
+    // 1.3.4부터 앱이 앞에 있으면 서비스는 화면에 맡기고 쉰다(쉬는 표시는 8초마다) — 멈춘 게 아니라 «쉬는 중»으로 보여 준다.
+    // 뒤에서 마지막으로 서버에 다녀온 시각도 함께 — HDMI를 보다 열었을 때 그동안 죽어 있었는지 가릴 수 있게(1.3.4 검수).
+    // 쉬는 표시가 20초 넘게 끊겼으면(서비스가 죽음) 예전처럼 마지막 시각만 보여 주고 3분이 넘으면 붉게.
+    var idle = yieldAt ? Date.now() - yieldAt : -1;
+    if (idle >= 0 && idle < 20000) { el.textContent = '뒤 감시: 쉬는 중' + (ms ? ' · 마지막 ' + txt : ''); el.style.color = ''; return; }
+    if (!ms) { el.textContent = '뒤 감시: 기록 없음'; el.style.color = '#b03030'; return; }
     el.textContent = '뒤 감시: ' + txt;
     el.style.color = sec > 180 ? '#b03030' : '';   // 3분 넘게 소식 없으면 붉게
   }
+  function readMs(r) { return r && r.value ? parseInt(r.value, 10) : 0; }
   function tick() {
-    Promise.resolve(P.get({ key: 'yc_last_poll' }))
-      .then(function (r) { render(r && r.value ? parseInt(r.value, 10) : 0); })
+    Promise.all([P.get({ key: 'yc_last_poll' }), P.get({ key: SVC_YIELD_KEY })])
+      .then(function (r) { render(readMs(r[0]), readMs(r[1])); })
       .catch(function () { });
   }
   tick();
@@ -1136,6 +1213,7 @@ window.addEventListener('DOMContentLoaded', function () {
 
   document.getElementById('liveDot').classList.remove('off');
 
+  loadWebAlerted();
   startPolling();
 
   // 상주형으로 시작했으면(사용자가 아이콘을 눌러 연 게 아니라 부팅/재시작으로 뜬 경우 포함)

@@ -52,6 +52,25 @@ public class YouCallService extends Service {
     private static final int NOTI_CALL = 2;
     private static final long POLL_MS = 2000L;
 
+    // 화면(웹)과 나눠 쓰는 표시. app.js가 Capacitor Preferences로 같은 저장소(CapacitorStorage)에 적는다.
+    // 1.3.3까지는 앱이 앞에 있어도 서비스(2초)와 화면(3초)이 둘 다 서버에 물어, 18개 반 학교에서 구글 한도에 걸렸다(2026-09-14).
+    private static final String KEY_WEB_POLL = "yc_web_poll";        // 화면이 호출을 묻고 있는 마지막 시각
+    private static final String KEY_WEB_ALERTED = "yc_web_alerted";  // 화면이 띄운 호출 "행:시각,행:시각"
+    private static final String KEY_SVC_YIELD = "yc_svc_yield";      // 서비스가 화면에 맡기고 쉰 마지막 시각(「뒤 감시」 표시용)
+    /** 이어진 실패 수. 서버가 한도에 걸렸을 때 2초마다 두드리지 않고 4·8·15초로 늘린다(PollGate.nextDelayMs). */
+    private volatile int failStreak = 0;
+    /**
+     * 실패가 이어져 물러난 동안 다음에 물어도 되는 때(부팅 뒤 흐른 시간 — 벽시계를 바꿔도 안 틀어진다). 0이면 곧바로.
+     * 박자(2초)는 그대로 두고 이 시각 전의 차례만 흘려보낸다. 박자 자체를 늘리면 쉬는 동안 늘어난 간격이 남아,
+     * 앱이 뒤로 간 뒤 첫 확인이 15초까지 늦었다(1.3.4 검수).
+     */
+    private volatile long nextPollAt = 0L;
+    /** 쉬는 표시(yc_svc_yield)는 8초마다만 적는다 — 저장소 파일을 2초마다 다시 쓰지 않게. 「뒤 감시」는 20초 안이면 «쉬는 중». */
+    private static final long YIELD_MARK_MS = 8000L;
+    private long lastYieldMark = 0L;
+    /** 서비스 기록으로 옮긴 마지막 화면 목록 값 — 값이 바뀔 때만 옮긴다. */
+    private String mergedWebAlerted = null;
+
     // Capacitor Preferences 플러그인이 쓰는 SharedPreferences 파일/키 규칙
     private static final String PREF_FILE = "CapacitorStorage";
     private static final String KEY_SETTINGS = "yc_settings";
@@ -176,7 +195,10 @@ public class YouCallService extends Service {
         @Override
         public void run() {
             if (!running) return;
-            if (!polling) {
+            // 앱이 앞에 떠서 화면이 스스로 묻고 있으면 이번 차례는 쉰다 — 같은 칠판이 두 갈래로 서버에 묻지 않게.
+            // 앞에 있을 때는 서비스가 호출을 찾아도 할 일이 없었다(알림·대체 알람은 앱이 뒤에 있을 때만) — 호출이 뜨는 속도는 그대로다.
+            // 실패가 이어져 물러난 중이면 nextPollAt 전의 차례만 흘려보낸다(0.3초는 박자 오차). 박자는 늘 2초라 뒤로 가면 곧바로 이어받는다.
+            if (!polling && !yieldToWeb() && android.os.SystemClock.elapsedRealtime() + 300 >= nextPollAt) {
                 polling = true;
                 new Thread(new Runnable() {
                     @Override public void run() {
@@ -187,6 +209,38 @@ public class YouCallService extends Service {
             handler.postDelayed(this, POLL_MS);
         }
     };
+
+    /** 화면에 맡기고 쉴 차례인가. 저장소를 못 읽는 등 이상하면 쉬지 않는다(틀려도 «묻는» 쪽으로). */
+    private boolean yieldToWeb() {
+        try {
+            SharedPreferences sp = getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE);
+            long now = System.currentTimeMillis();
+            if (!PollGate.yieldToWeb(MainActivity.inForeground, sp.getString(KEY_WEB_POLL, null), now)) return false;
+            failStreak = 0; nextPollAt = 0L;   // 쉬는 동안엔 서버 상태를 모른다 — 옛 실패 수가 남아 뒤로 간 뒤 첫 실패에 곧바로 15초 물러나지 않게
+            // 앞에서 화면이 띄운 호출을 서비스 기록(yc_alerted_rows)으로 옮긴다 — 1.3.3에서 서비스가 앞에서도 물어 남기던 기록과 같은 뜻.
+            // 이렇게 해야 앱이 죽었다 살아나도(메모리의 leftForegroundAt이 사라져도) 이미 띄운 호출로 칠판을 다시 끌어오지 않는다(1.3.4 검수).
+            // 이 자리는 폴링 스레드가 돌지 않을 때(!polling)만 불려 alertedRows를 함께 만지지 않는다.
+            String wa = sp.getString(KEY_WEB_ALERTED, null);
+            if (wa != null && !wa.equals(mergedWebAlerted)) {
+                boolean added = false;
+                for (long[] e : PollGate.webAlertedEntries(wa, now, ALERTED_TTL_MS)) {
+                    int row = (int) e[0];
+                    if (alertedRows.add(row)) { alertedAt.put(row, e[1]); added = true; }
+                }
+                if (added) saveAlerted(sp);
+                mergedWebAlerted = wa;
+            }
+            // 「뒤 감시」가 «멈춤»이 아니라 «쉬는 중»으로 보이게. 저장소 파일 전체를 다시 쓰므로 8초마다만.
+            if (now - lastYieldMark >= YIELD_MARK_MS || now < lastYieldMark) {
+                lastYieldMark = now;
+                sp.edit().putString(KEY_SVC_YIELD, String.valueOf(now)).apply();
+                setOngoing("유콜 화면이 호출을 확인하는 중");   // 쉬기 전 «서버 연결 실패» 같은 문구가 남아 있지 않게
+            }
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
 
     /**
      * 설정 주소에서 교사용 쿼리(role·k)와 #해시를 뗀다. k는 교사 열쇠라 칠판 요청에 실려 나가면 안 된다.
@@ -237,7 +291,7 @@ public class YouCallService extends Service {
                 + "&classNum=" + URLEncoder.encode(classNum, "UTF-8");
 
             String body = httpGet(url);
-            if (body == null) { setOngoing(grade + "학년 " + classNum + "반 · 서버 연결 실패 (주소 확인)"); return; }
+            if (body == null) { markFailed(); setOngoing(grade + "학년 " + classNum + "반 · 서버 연결 실패 (주소 확인)"); return; }
 
             // 상태바만 보고도 무엇이 막고 있는지 알 수 있어야 한다.
             // 절전 제외가 안 되어 있으면 HDMI를 보는 동안 이 감시가 통째로 멈춘다 — 그게 더 큰 문제라 앞에 쓴다.
@@ -258,6 +312,7 @@ public class YouCallService extends Service {
             if (++sleepGuardTick % 60 == 0) keepScreenTimeoutOff();
 
             JSONArray calls = new JSONArray(body);
+            failStreak = 0; nextPollAt = 0L;   // 서버가 제대로 답했다 — 물러났던 간격을 곧바로 2초로 되돌린다
             if (calls.length() == 0) return;
 
             // 아직 안 띄운 호출 중 가장 앞의 것
@@ -266,9 +321,15 @@ public class YouCallService extends Service {
                 int row = c.optInt("row", -1);
                 if (row < 0 || alertedRows.contains(row)) continue;
 
+                // 서비스가 쉬는 동안(앱이 앞에 있을 때) 화면이 이미 띄운 호출이면 새 호출로 보지 않는다 —
+                // 앱이 뒤로 간 뒤 같은 호출로 칠판을 다시 끌어오지 않게. 1.3.3까지는 서비스가 앞에서도 물어 스스로 기록을 남겼다.
+                long nowMs = System.currentTimeMillis();
+                boolean shown = PollGate.shownWhileForeground(sp.getString(KEY_WEB_ALERTED, null), row,
+                    MainActivity.inForeground, MainActivity.leftForegroundAt, nowMs, ALERTED_TTL_MS);
                 alertedRows.add(row);
-                alertedAt.put(row, System.currentTimeMillis());
+                alertedAt.put(row, nowMs);
                 saveAlerted(sp);          // 죽었다 살아나도 같은 호출로 또 울리지 않도록 즉시 남긴다
+                if (shown) continue;
                 String name = c.optString("name", "");
                 String num = c.optString("num", "");
                 String teacher = c.optString("teacher", "");
@@ -277,9 +338,20 @@ public class YouCallService extends Service {
                 break;
             }
         } catch (Exception e) {
+            markFailed();             // 로그인 화면(HTML)·한도 초과 안내 같은 깨진 응답도 실패로 센다
             Log.w(TAG, "poll 실패: " + e.getMessage());
             setOngoing("점검 필요: " + e.getClass().getSimpleName());
         }
+    }
+
+    /**
+     * 실패를 하나 세고, 다음에 물어도 되는 때를 늦춘다(4→8→15초). 박자는 그대로라 성공하면 곧바로 2초로 돌아온다.
+     * 실패가 «끝난» 때부터 잰다 — 보낸 때부터 재면 8초 시간 초과 뒤 곧바로 다시 보내 물러나기가 헛돈다(1.3.4 검수).
+     * 벽시계가 아니라 부팅 뒤 흐른 시간이라 시각을 바꿔도 안 틀어진다.
+     */
+    private void markFailed() {
+        failStreak++;
+        nextPollAt = android.os.SystemClock.elapsedRealtime() + PollGate.nextDelayMs(POLL_MS, failStreak);
     }
 
     private boolean canOverlay() {

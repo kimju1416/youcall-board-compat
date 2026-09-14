@@ -14,6 +14,8 @@ public class MainActivity extends BridgeActivity {
     /** 이 화면이 지금 앞에 있는지. 서비스가 소리를 낼지 말지 이 값으로 가른다
      *  — 화면이 떠 있으면 웹이 사용자가 고른 호출음을 내므로 서비스는 조용히 있는다. */
     public static volatile boolean inForeground = false;
+    /** 이 화면이 마지막으로 뒤로 간 시각. 서비스가 «앱이 앞에 있는 동안 화면이 이미 띄운 호출»을 가를 때 쓴다(PollGate.shownWhileForeground). */
+    public static volatile long leftForegroundAt = 0L;
 
     @Override public void onResume() {
         super.onResume();
@@ -23,7 +25,8 @@ public class MainActivity extends BridgeActivity {
         // 앱을 앞으로 가져오면 감시가 돌아오게. singleTask라 돌아올 때는 onCreate가 안 불린다. 이미 돌고 있으면 해가 없다.
         try { YouCallService.start(this); } catch (Exception ignored) { }
     }
-    @Override public void onPause() { inForeground = false; super.onPause(); }
+    // 시각을 먼저 적고 inForeground를 내린다 — 서비스가 그 사이에 읽어도 «앞에 있음» 또는 «방금 뒤로 감» 중 하나로 맞게 읽힌다
+    @Override public void onPause() { leftForegroundAt = System.currentTimeMillis(); inForeground = false; super.onPause(); }
 
     @Override
     public void onCreate(Bundle savedInstanceState) {

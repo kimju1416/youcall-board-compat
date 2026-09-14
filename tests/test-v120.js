@@ -234,15 +234,24 @@ check('3-4 확인 재시도: 서버가 ok:false(다른 반 등)를 주면 다시
   await c.confirmWithRetry('https://a.b/exec', 9, '3', '2');
   same(sent.length, 1, '보낸 횟수'); same(waits, [], '기다림 없음');
 });
+// serverCalls: 배열이면 늘 그 목록, 함수면 (몇 번째 요청) → 응답 Promise
 function tickBox(serverCalls) {
-  const log = { confirm: [], standby: 0, alert: [] };
-  const c = sandbox(['tick', 'isConfigured'], { optional: ['normalizeClassNo', 'confirmWithRetry'], after: 'var current = null, alertedRows = {}, autoDismissSec = 30;' });
+  const log = { confirm: [], standby: 0, alert: [], prefs: [], getCalls: 0 };
+  const P = { set: o => { log.prefs.push(o); return Promise.resolve(); } };
+  // 1.3.4 부하 줄이기 변수는 있으면 싣는다(옛 app.js와 대조할 때는 없다)
+  const newVars = ['POLL_MS', 'WEB_POLL_KEY', 'pollBusy'].filter(v => { try { varLine(v); return true; } catch (e) { return false; } });
+  const c = sandbox(['tick', 'isConfigured'], {
+    vars: newVars,
+    optional: ['normalizeClassNo', 'confirmWithRetry', 'nativePrefs', 'pollDelayMs', 'markWebPolling', 'rememberWebAlerted'],
+    globals: { window: { Capacitor: { Plugins: { Preferences: P } } } },
+    after: 'var current = null, alertedRows = {}, autoDismissSec = 30;'
+  });
   vm.runInContext('var CONFIRM_RETRY_MS = [2000, 5000, 10000];', c);
   c.__NOW = new Date(2026, 8, 15, 10, 23).getTime();
   c.SETTINGS = { webAppUrl: 'https://a.b/exec', grade: '3', classNum: '2', mode: 'standby', showStandby: true };
   c.wait = () => Promise.resolve();
   c.api = {
-    getCalls: () => Promise.resolve({ ok: true, data: serverCalls }),
+    getCalls: () => { log.getCalls++; return typeof serverCalls === 'function' ? serverCalls(log.getCalls) : Promise.resolve({ ok: true, data: serverCalls }); },
     confirmCall: function () { log.confirm.push([].slice.call(arguments)); return Promise.resolve({ ok: true, data: { ok: true } }); }
   };
   c.showStandby = () => { log.standby++; };
@@ -268,7 +277,7 @@ check('3-6 새 호출은 띄우고, 목록이 비면 대기화면 (기존 동작
 });
 check('3-7 Java 서비스: 폴링이 겹치지 않게 한 번에 하나만 돈다 (글자 검사)', () => {
   ok(/private volatile boolean polling/.test(JSRC), 'volatile polling 표식이 없다');
-  ok(/if \(!polling\) \{\s*polling = true;/.test(JSRC), '겹침 방지 분기가 없다');
+  ok(/if \(!polling[^\n]*\) \{\s*polling = true;/.test(JSRC), '겹침 방지 분기가 없다');
   ok(/finally \{ polling = false; \}/.test(JSRC), '끝나면 polling을 풀지 않는다');
 });
 
@@ -561,16 +570,255 @@ if (FLAVOR === 'compat') {
     ok(/public void onResume\(\)[\s\S]{0,600}try \{ YouCallService\.start\(this\); \} catch \(Exception ignored\)/.test(MAIN_SRC), '앱을 앞으로 가져와도 멈춘 서비스를 다시 세우지 않는다(singleTask라 onCreate가 안 불림)');
     ok(/try \{ nm\.notify\(NOTI_CALL, b\.build\(\)\); \}/.test(JSRC), '호출 알림 notify가 try 밖이다 — 예외 나면 «이미 알림» 기록만 남고 화면·알람을 건너뛴다');
   });
+
+  /* 2026-09-14 18개 반 학교의 «트래픽 오류» — 칠판 한 대가 서비스(2초)·화면(3초) 두 갈래로 서버에 물어 구글 한도에 걸렸다.
+     1.3.4: 앱이 앞에서 화면이 묻는 동안 서비스는 쉬고 / 앞 요청이 안 끝나면 겹쳐 보내지 않고 / 실패가 이어지면 물러나고 / 박자를 흩뜨린다.
+     «호출이 뜨는 속도는 그대로»와 «쉬다가 호출을 놓치지 않는다»를 함께 잰다. */
+  let JAVA_DELAYS = null;
+  check('L-1 PollGate 규칙(서비스가 쉬는 조건·물러나는 간격·이미 띄운 호출) — javac로 실제 실행', () => {
+    const { spawnSync } = require('child_process');
+    const os = require('os');
+    const out = fs.mkdtempSync(path.join(os.tmpdir(), 'yc-pollgate-'));
+    try {
+      const gate = path.join(path.dirname(JAVA), 'PollGate.java');
+      const test = path.join(ROOT, 'tests', 'java', 'PollGateTest.java');
+      ok(fs.existsSync(gate), 'PollGate.java가 없다: ' + gate);
+      const jc = spawnSync('javac', ['-encoding', 'UTF-8', '-d', out, gate, test], { encoding: 'utf8' });
+      ok(!jc.error, '자바 컴파일러(javac)를 못 찾아 못 쟀다: ' + (jc.error && jc.error.message));
+      ok(jc.status === 0, 'javac 실패:\n' + jc.stderr);
+      const run = spawnSync('java', ['-Dstdout.encoding=UTF-8', '-cp', out, 'com.kimju.youcallboard.PollGateTest'], { encoding: 'utf8' });
+      ok(run.status === 0, 'PollGate 검사 실패:\n' + run.stdout + run.stderr);
+      const tbl = spawnSync('java', ['-cp', out, 'com.kimju.youcallboard.PollGateTest', 'delays'], { encoding: 'utf8' });
+      JAVA_DELAYS = JSON.parse(tbl.stdout.trim());
+    } finally {
+      fs.rmSync(out, { recursive: true, force: true });
+    }
+  });
+  check('L-2 화면: 앞 요청이 안 끝나면 겹쳐 보내지 않고, 쉬는 차례에도 «묻는 중»을 적는다', async () => {
+    let release = null;
+    const { c, log } = tickBox(() => new Promise(r => { release = r; }));
+    const T0 = 1789000000000;
+    // 응답이 안 온 요청을 await하면 검사가 거기서 멈춘다 — tick은 부르기만 하고 flush로 동기 부분만 돌린다
+    c.__NOW = T0; c.tick(); await flush();
+    c.__NOW = T0 + 3000; c.tick(); await flush();
+    c.__NOW = T0 + 6000; c.tick(); await flush();
+    same(log.getCalls, 1, '응답 전에 보낸 요청 수');
+    const polls = log.prefs.filter(o => o.key === 'yc_web_poll');
+    same(polls.length, 3, '«묻는 중» 표시 횟수(요청을 쉰 차례 포함)');
+    same(polls[2].value, String(T0 + 6000), '표시 값은 지금 시각');
+    release({ ok: true, data: [] }); await flush(); await flush();
+    c.__NOW = T0 + 9000; c.tick(); await flush();
+    same(log.getCalls, 2, '응답이 온 뒤 다음 차례에는 다시 묻는다');
+    release({ ok: true, data: [] }); await flush();
+  });
+  check('L-3 화면: 실패가 이어지면 3→6→12→15초로 물러나고 성공하면 3초로 — 서비스(PollGate)와 같은 간격표', async () => {
+    let fail = true;
+    const { c, log } = tickBox(() => Promise.resolve(fail ? { ok: false, error: 'HTTP 500' } : { ok: true, data: [] }));
+    const T0 = 1789000000000, sentAt = [];
+    for (let t = 0; t <= 60000; t += 3000) {
+      c.__NOW = T0 + t;
+      const before = log.getCalls;
+      await c.tick(); await flush();
+      if (log.getCalls > before) sentAt.push(t);
+    }
+    same(sentAt, [0, 6000, 18000, 33000, 48000], '실패가 이어질 때 보낸 시각(3초 박자 위)');
+    fail = false;
+    c.__NOW = T0 + 63000; await c.tick(); await flush();
+    const b = log.getCalls;
+    c.__NOW = T0 + 66000; await c.tick(); await flush();
+    same(log.getCalls - b, 1, '성공한 뒤에는 바로 다음 3초 차례에 묻는다');
+    ok(JAVA_DELAYS, 'L-1이 자바 간격표를 못 만들어 대조하지 못했다');
+    const F = [0, 1, 2, 3, 4, 5, 6, 7, 8];
+    same(F.map(f => c.pollDelayMs(3000, f)), JAVA_DELAYS['3000'], 'app.js pollDelayMs(3초) = PollGate.nextDelayMs');
+    same(F.map(f => c.pollDelayMs(2000, f)), JAVA_DELAYS['2000'], 'app.js pollDelayMs(2초) = PollGate.nextDelayMs');
+  });
+  check('L-4 화면이 띄운 호출을 «행:시각»으로 서비스에 알린다 (최근 30개·같은 행은 한 번)', async () => {
+    const { c, log } = tickBox([{ row: 41, num: 3, name: '가상학생' }]);
+    c.__NOW = 1789000000000;
+    await c.tick(); await flush();
+    same(log.alert, [41], '호출 표시');
+    const w = () => log.prefs.filter(o => o.key === 'yc_web_alerted');
+    same(w().length, 1, '알린 횟수');
+    same(w()[0].value, '41:1789000000000', '적은 값');
+    await c.tick(); await flush();
+    same(w().length, 1, '이미 띄운 호출을 다시 알리지 않는다');
+    for (let r = 100; r < 140; r++) c.rememberWebAlerted(r);
+    let parts = w().pop().value.split(',');
+    same(parts.length, 30, '최근 30개만');
+    same(parts[29].split(':')[0], '139', '맨 끝이 가장 최근');
+    c.rememberWebAlerted(120);
+    parts = w().pop().value.split(',');
+    same(parts.filter(x => x.indexOf('120:') === 0).length, 1, '같은 행은 한 번만');
+    same(parts[29].split(':')[0], '120', '다시 띄운 행은 맨 끝으로');
+  });
+  check('L-5 서비스: 앞에서 화면이 묻는 동안 쉬고·실패하면 물러나고·앞에서 이미 띄운 호출로 칠판을 다시 끌어오지 않는다 (글자 검사)', () => {
+    const GATE = fs.readFileSync(path.join(path.dirname(JAVA), 'PollGate.java'), 'utf8');
+    ok(/if \(!polling && !yieldToWeb\(\) && android\.os\.SystemClock\.elapsedRealtime\(\) \+ 300 >= nextPollAt\) \{\s*polling = true;/.test(JSRC), '서비스가 쉬는 분기·물러난 차례 흘려보내기가 없다');
+    ok(/PollGate\.yieldToWeb\(MainActivity\.inForeground, sp\.getString\(KEY_WEB_POLL, null\), now\)/.test(JSRC), '쉬는 조건이 «앱이 앞에 있음 + 화면 표시»가 아니다');
+    // 검수(1.3.4): 박자 자체를 늘리면 쉬는 동안 늘어난 간격이 남아 뒤로 간 뒤 첫 확인이 15초 늦었다 — 박자는 늘 2초
+    ok(/private final Runnable pollTask[\s\S]*?handler\.postDelayed\(this, POLL_MS\);/.test(JSRC) && !/postDelayed\(this, PollGate\.nextDelayMs/.test(JSRC), '박자가 2초 그대로가 아니다');
+    // 검수(1.3.4): 보낸 때부터 재면 8초 시간 초과 뒤 곧바로 다시 보내 물러나기가 헛돈다 — 실패가 «끝난» 때부터, 벽시계가 아닌 부팅 뒤 흐른 시간으로
+    ok(/private void markFailed\(\) \{\s*failStreak\+\+;\s*nextPollAt = android\.os\.SystemClock\.elapsedRealtime\(\) \+ PollGate\.nextDelayMs\(POLL_MS, failStreak\);/.test(JSRC), '물러날 때를 실패가 끝난 때부터·부팅 뒤 흐른 시간으로 정하지 않는다');
+    ok(/if \(body == null\) \{ markFailed\(\);/.test(JSRC), '연결 실패를 세지 않는다');
+    ok(/new JSONArray\(body\);\s*failStreak = 0; nextPollAt = 0L;/.test(JSRC), '제대로 답하면 간격을 되돌리지 않는다');
+    ok(/catch \(Exception e\) \{\s*markFailed\(\);/.test(JSRC), '깨진 응답(로그인 화면 등)을 실패로 세지 않는다');
+    ok(/if \(!PollGate\.yieldToWeb\([^\n]*\)\) return false;\s*failStreak = 0; nextPollAt = 0L;/.test(JSRC), '쉬는 동안 옛 실패 수가 남아 뒤로 간 뒤 첫 실패에 곧바로 15초 물러난다');
+    // 검수(1.3.4): 쉬는 동안 화면이 띄운 호출을 서비스 기록으로 옮겨야 앱이 죽었다 살아나도 칠판을 다시 끌어오지 않는다
+    ok(/PollGate\.webAlertedEntries\(wa, now, ALERTED_TTL_MS\)/.test(JSRC) && /if \(added\) saveAlerted\(sp\);/.test(JSRC) && /mergedWebAlerted = wa;/.test(JSRC), '쉬는 동안 화면이 띄운 호출을 서비스 기록(yc_alerted_rows)으로 옮기지 않는다');
+    ok(/now - lastYieldMark >= YIELD_MARK_MS/.test(JSRC), '쉬는 표시를 2초마다 저장소에 다시 쓴다');
+    ok(/PollGate\.shownWhileForeground\(sp\.getString\(KEY_WEB_ALERTED, null\), row,\s*MainActivity\.inForeground, MainActivity\.leftForegroundAt/.test(JSRC), '화면이 앞에서 띄운 호출을 가르지 않는다');
+    const loop = JSRC.slice(JSRC.indexOf('PollGate.shownWhileForeground('), JSRC.indexOf('bringAppToFront(row,'));
+    ok(/saveAlerted\(sp\);[^\n]*\n\s*if \(shown\) continue;/.test(loop), '이미 띄운 호출도 기록은 남기고, 칠판을 끌어오기 전에 건너뛰어야 한다');
+    ok(/onPause\(\) \{ leftForegroundAt = System\.currentTimeMillis\(\); inForeground = false;/.test(MAIN_SRC), '뒤로 간 시각을 inForeground보다 먼저 적지 않는다');
+    [['KEY_WEB_POLL', 'WEB_POLL_KEY', 'yc_web_poll'], ['KEY_WEB_ALERTED', 'WEB_ALERTED_KEY', 'yc_web_alerted'], ['KEY_SVC_YIELD', 'SVC_YIELD_KEY', 'yc_svc_yield']].forEach(([j, w, v]) => {
+      ok(new RegExp(j + ' = "' + v + '"').test(JSRC), 'Java ' + j + '가 ' + v + '가 아니다');
+      ok(new RegExp(w + " = '" + v + "'").test(SRC), 'app.js ' + w + '가 ' + v + '가 아니다');
+    });
+    ok(/MAX_DELAY_MS = 15000L/.test(GATE) && /POLL_MAX_MS = 15000/.test(SRC), '물러나는 상한이 양쪽에서 15초가 아니다');
+    ok(/WEB_ALIVE_MS = 7000L/.test(GATE) && /var POLL_MS = 3000/.test(SRC), '화면 박자(3초)보다 넉넉한 생존 판정(7초)이 아니다');
+  });
+  check('L-6 급식·시간표 셋을 한꺼번에 보내지 않고 차례로 (켤 때·30분마다 몰림 줄이기)', async () => {
+    const pending = [];
+    const c = sandbox(['refreshMeal', 'isConfigured'], { vars: ['POLL_MS', 'pollTimer', 'lastMeal'], optional: ['normalizeClassNo'] });
+    c.SETTINGS = { webAppUrl: 'https://a.b/exec', grade: '3', classNum: '2' };
+    c.setTimeout = () => 1; c.clearTimeout = () => {};
+    const req = name => new Promise(r => pending.push({ name, r }));
+    c.api = { getMeal: () => req('meal'), getTimetable: (u, g, cn, scope) => req(scope) };
+    const seen = [];
+    c.onBoardData = d => seen.push(d);
+    const done = c.refreshMeal();
+    await flush();
+    same(pending.map(x => x.name), ['meal'], '첫 응답 전에 보낸 요청');
+    pending[0].r({ ok: true, data: [] }); await flush(); await flush();
+    same(pending.map(x => x.name), ['meal', 'today'], '두 번째 요청');
+    pending[1].r({ ok: true, data: todayList(7) }); await flush(); await flush();
+    same(pending.map(x => x.name), ['meal', 'today', 'week'], '세 번째 요청');
+    pending[2].r({ ok: true, data: subjWeek(7) }); await done;
+    same([seen.length, seen[0].todayTimetable.length], [1, 7], '셋 다 받은 뒤 한 번 그린다');
+  });
+  check('L-7 켤 때 3초 박자·3분·30분 주기를 칠판마다 흩뜨린다 / 첫 확인은 곧바로', async () => {
+    function run(r) {
+      const intervals = [], timeouts = [], order = [];
+      const c = sandbox(['startPolling'], { vars: ['POLL_MS', 'pollTimer'] });
+      vm.runInContext('Math.random = function () { return ' + r + '; };', c);
+      c.setInterval = (f, ms) => { intervals.push(ms); return 1; }; c.clearInterval = () => {};
+      c.setTimeout = (f, ms) => { timeouts.push({ f, ms }); return 2; }; c.clearTimeout = () => {};
+      c.refreshMeal = () => order.push('meal'); c.tick = () => order.push('tick');
+      c.refreshBoard = () => Promise.resolve();
+      c.startPolling();
+      return { c, intervals, timeouts, order };
+    }
+    const hi = run(0.999); await flush();
+    ok(hi.order.indexOf('tick') >= 0, '첫 확인을 곧바로 하지 않는다');
+    same(hi.timeouts.length, 1, '3초 박자 시작 예약');
+    ok(hi.timeouts[0].ms >= 2990 && hi.timeouts[0].ms < 3000, '3초 박자 시작을 0~3초 흩뜨리지 않는다: ' + hi.timeouts[0].ms);
+    ok(hi.intervals.indexOf(3000) < 0, '흩뜨리기 전에 3초 박자가 이미 돈다');
+    const ticksBefore = hi.order.filter(x => x === 'tick').length;
+    hi.timeouts[0].f();
+    ok(hi.intervals.indexOf(3000) >= 0, '흩뜨린 뒤 3초 박자로 돌지 않는다');
+    same(hi.order.filter(x => x === 'tick').length - ticksBefore, 1, '박자를 여는 순간에도 한 번 묻는다(첫 확인과 두 번째 사이가 3초를 넘지 않게)');
+    ok(hi.intervals.some(ms => ms > 180000 && ms < 200000), '3분 주기를 흩뜨리지 않는다: ' + hi.intervals.join(','));
+    ok(hi.intervals.some(ms => ms > 1800000 && ms < 1920000), '30분 주기를 흩뜨리지 않는다: ' + hi.intervals.join(','));
+    const lo = run(0); await flush();
+    same(lo.timeouts[0].ms, 0, '난수 0이면 곧바로');
+    ok(lo.intervals.indexOf(180000) >= 0 && lo.intervals.indexOf(1800000) >= 0, '난수 0이면 원래 주기: ' + lo.intervals.join(','));
+    ok(/if \(pollStartTimer\) \{ clearTimeout\(pollStartTimer\); pollStartTimer = null; \}/.test(fn('startPolling')), '다시 시작할 때 예약된 3초 박자 시작을 지우지 않는다(박자가 둘로 겹친다)');
+  });
+  check('L-8 「뒤 감시」: 서비스가 화면에 맡기고 쉬는 중이면 붉게 경고하지 않고, 쉬는 표시가 끊기면 예전처럼 마지막 시각', async () => {
+    const vals = {};
+    const P = { get: o => Promise.resolve({ value: vals[o.key] == null ? null : vals[o.key] }) };
+    const reg = {};
+    const head = { insertBefore: el => { reg[el.id] = el; } };
+    const c = sandbox(['showLastPollBadge'], {
+      vars: ['WEB_POLL_KEY'],
+      globals: { window: { Capacitor: { Plugins: { Preferences: P } } }, setInterval: () => 1, showSourceReport: () => {} }
+    });
+    c.document = {
+      querySelector: s => (s === '.hright' ? head : null),
+      getElementById: id => reg[id] || null,
+      createElement: t => { const e = new El(t); e.addEventListener = () => {}; return e; }
+    };
+    const NOW = 1789000000000;
+    c.__NOW = NOW;
+    const show = async () => { c.showLastPollBadge(); await flush(); await flush(); return reg.pollBadge; };
+    vals.yc_last_poll = String(NOW - 600000); vals.yc_svc_yield = String(NOW - 2000);
+    let el = await show();
+    same([el.textContent, el.style.color], ['뒤 감시: 쉬는 중 · 마지막 10분 전', ''], '서비스가 쉬는 중 — 뒤에서 마지막으로 다녀온 시각도 함께(진단)');
+    vals.yc_svc_yield = String(NOW - 15000);
+    el = await show();
+    same([el.textContent, el.style.color], ['뒤 감시: 쉬는 중 · 마지막 10분 전', ''], '쉬는 표시는 8초마다 적히니 15초 전이어도 쉬는 중');
+    vals.yc_svc_yield = String(NOW - 60000);
+    el = await show();
+    same([el.textContent, el.style.color], ['뒤 감시: 10분 전', '#b03030'], '쉬는 표시도 끊긴 서비스는 마지막 시각·붉게');
+    delete vals.yc_svc_yield; vals.yc_last_poll = String(NOW - 5000);
+    el = await show();
+    same([el.textContent, el.style.color], ['뒤 감시: 5초 전', ''], '평소(앱이 뒤에 있어 서비스가 묻는 중)');
+  });
+  check('L-9 화면: 시계가 뒤로 가도 멈추지 않고 / 목록이 아닌 답도 실패로 세고 / 상주형에서 마감 뒤 대기 중인 다음 호출을 놓치지 않는다', async () => {
+    const T0 = 1789000000000;
+    // (1) 물러난 중에 시계가 1시간 뒤로 — 예전 값대로면 1시간 동안 안 묻는데 «묻는 중»은 적혀 서비스도 쉰다
+    const a = tickBox(() => Promise.resolve({ ok: false, error: 'HTTP 500' }));
+    a.c.__NOW = T0; await a.c.tick(); await flush();
+    a.c.__NOW = T0 - 3600000;
+    const a1 = a.log.getCalls;
+    await a.c.tick(); await flush();
+    same(a.log.getCalls - a1, 1, '시계가 1시간 뒤로 가도 곧바로 다시 묻는다');
+    // (2) 200인데 목록(배열)이 아닌 답 — 서비스는 JSONArray로 못 읽어 실패로 센다. 화면도 같게.
+    const b = tickBox(() => Promise.resolve({ ok: true, data: { ok: false, msg: '알 수 없는 api' } }));
+    b.c.__NOW = T0; await b.c.tick(); await flush();
+    const b1 = b.log.getCalls;
+    b.c.__NOW = T0 + 3000; await b.c.tick(); await flush();
+    same(b.log.getCalls - b1, 0, '목록이 아닌 답 뒤에는 물러난다');
+    same(b.log.standby, 1, '목록이 아닌 답이면 대기화면(예전 동작 유지)');
+    // (3) 상주형 칠판에서 요청이 돌아오기 전에 호출 화면이 마감 — 확인은 곧바로 보내고, 화면은 응답을 받은 뒤 정한다(1.3.3과 같게).
+    //     먼저 닫으면 상주형이 내려가 버려, 응답에 실려 온 «대기 중인 다음 호출»이 뒤에서 떠 안 보인다(1.3.4 재검수)
+    let release = null;
+    const d = tickBox(() => new Promise(r => { release = r; }));
+    d.c.SETTINGS.mode = 'tray';
+    d.c.__NOW = T0; d.c.tick(); await flush();
+    vm.runInContext('alertedRows[5] = true; current = { row: 5, num: 12, name: "가상학생", deadlineAt: __NOW - 1, totalSec: 30 };', d.c);
+    d.c.__NOW = T0 + 3000; d.c.tick(); await flush();
+    same(d.log.confirm.length, 1, '마감 확인(confirm)은 곧바로 보낸다');
+    same(d.log.getCalls, 1, '겹쳐 묻지는 않는다');
+    same([d.log.standby, d.log.alert.length], [0, 0], '응답 전에는 호출 화면을 닫지 않는다(상주형이 내려가지 않게)');
+    release({ ok: true, data: [{ row: 6, num: 7, name: '가상학생2' }] }); await flush(); await flush();
+    same(d.log.alert, [6], '응답에 실린 대기 중인 다음 호출을 곧바로 띄운다');
+    same(d.log.standby, 0, '다음 호출이 있으면 대기화면으로 가지 않는다');
+  });
+  check('L-10 켤 때 지난번 화면 목록을 읽어 합친다 (새로고침 뒤 첫 호출 한 건으로 목록을 통째로 덮어쓰지 않게)', async () => {
+    const sets = [];
+    let stored = '7:1789000000000,깨짐,8:1789000001000';
+    let resolveGet = null;
+    const P = { get: () => new Promise(r => { resolveGet = () => r({ value: stored }); }), set: o => { sets.push(o); return Promise.resolve(); } };
+    const c = sandbox(['nativePrefs', 'rememberWebAlerted', 'loadWebAlerted'], { vars: ['WEB_POLL_KEY', 'pollBusy'], globals: { window: { Capacitor: { Plugins: { Preferences: P } } } } });
+    c.__NOW = 1789000005000;
+    c.loadWebAlerted();
+    c.rememberWebAlerted(9);            // 읽기가 끝나기 전에 새 호출이 먼저 와도
+    resolveGet(); await flush(); await flush();
+    c.__NOW = 1789000006000;
+    c.rememberWebAlerted(10);
+    same(sets.pop().value, '7:1789000000000,8:1789000001000,9:1789000005000,10:1789000006000', '읽은 목록 + 먼저 온 호출 + 새 호출');
+    ok(/loadWebAlerted\(\);\s*\n\s*startPolling\(\);/.test(SRC), '켤 때 목록을 읽고 나서 폴링을 시작하지 않는다');
+  });
 }
 
 /* ---------- 실행 ---------- */
+// 끝나지 않는 await(응답이 오지 않는 가짜 요청)에 걸리면 노드가 «결과» 줄 없이 조용히 끝난다 — 통과처럼 보이지 않게 실패로 끝낸다
+let running = null;
+process.on('beforeExit', () => {
+  if (!running) return;
+  console.log('  멈춤  ' + running + '\n      끝나지 않는 await에 걸려 검사가 멈췄다 — 뒤 검사는 돌지 않았다');
+  process.exit(1);
+});
 (async () => {
   let pass = 0, fail = 0;
   console.log('[' + FLAVOR + '] ' + APP);
   for (const t of results) {
+    running = t.name;
     try { await t.body(); pass++; console.log('  통과  ' + t.name); }
     catch (e) { fail++; console.log('  실패  ' + t.name + '\n      ' + String(e && e.message || e).split('\n').join('\n      ')); }
   }
+  running = null;
   console.log('\n결과: 통과 ' + pass + ' / 실패 ' + fail + ' (전체 ' + results.length + ')');
   process.exit(fail ? 1 : 0);
 })();
