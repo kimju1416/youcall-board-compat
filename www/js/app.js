@@ -205,7 +205,8 @@ var pollBusy = false, pollFails = 0, pollNextAt = 0, webAlerted = [];
 // 급식/시간표 직전 성공값(last-good) — NEIS 일시 실패 시 빈값으로 덮지 않고 이 값을 유지한다.
 // 시간표는 처음에 null(아직 못 받음)이다 — []·{}로 두면 «받았는데 비었음»과 구분이 안 돼
 // 첫 요청이 실패한 날이 «오늘은 수업이 없어요»로 보인다.
-var lastMeal = [], lastToday = null, lastWeek = null;
+// 급식도 처음엔 null(못 받음) — []로 두면 서버 오류로 한 번도 못 받은 날이 «오늘은 급식이 없어요»로 보였다(1.3.5, 전수 점검).
+var lastMeal = null, lastToday = null, lastWeek = null;
 
 // 학년·반이 숫자 모양이 아니면(고칠 수 없는 옛 저장값) 설정 전으로 본다 — 그대로 돌면 호출이 조용히 안 온다.
 function isConfigured() { return !!(SETTINGS.webAppUrl && normalizeClassNo(SETTINGS.grade) && normalizeClassNo(SETTINGS.classNum)); }
@@ -230,15 +231,17 @@ async function refreshMeal() {
   var meal = await api.getMeal(s.webAppUrl);
   var today = await api.getTimetable(s.webAppUrl, s.grade, s.classNum, 'today');
   var week = await api.getTimetable(s.webAppUrl, s.grade, s.classNum, 'week');
-  if (meal.ok) lastMeal = meal.data;   // 실패면 직전값 유지(빈값으로 덮지 않음)
-  // 시간표는 모양까지 본다 — 오늘은 배열, 이번 주는 {날짜: [...]} 객체. 200 응답이라도 모양이 다르면
+  // 급식·시간표 모두 모양까지 본다 — 급식은 배열, 오늘은 배열, 이번 주는 {날짜: [...]} 객체. 200 응답이라도 모양이 다르면
   // 받은 것으로 치지 않는다(직전값 유지 + 재시도). 한 번도 못 받았으면 null이 그대로 가서 «못 받음»으로 그려진다.
+  // (급식은 1.3.4까지 ok만 봐서, 목록이 아닌 답이 직전 급식을 덮었다 — 1.3.5)
+  var mealOk = meal.ok && Array.isArray(meal.data);
   var todayOk = today.ok && Array.isArray(today.data);
   var weekOk = week.ok && !!week.data && typeof week.data === 'object' && !Array.isArray(week.data);
+  if (mealOk) lastMeal = meal.data;   // 실패면 직전값 유지(빈값으로 덮지 않음)
   if (todayOk) lastToday = today.data;
   if (weekOk) lastWeek = week.data;
   onBoardData({ meal: lastMeal, todayTimetable: lastToday, weekTimetable: lastWeek });
-  if (!meal.ok || !todayOk || !weekOk) {
+  if (!mealOk || !todayOk || !weekOk) {
     if (mealRetryTimer) clearTimeout(mealRetryTimer);
     mealRetryTimer = setTimeout(refreshMeal, MEAL_RETRY_MS);
   }
@@ -404,7 +407,8 @@ function speakAsync(text, myToken) {
     setTtsStatus('🔄 음성 준비 중...');
     api.getTts(SETTINGS.webAppUrl, text).then(function (res) {
       if (myToken !== _ttsToken) { resolve(); return; }
-      if (!res.ok || !res.data || !res.data.audio) { setTtsStatus('⚠️ 음성 준비 실패'); resolve(); return; }
+      // 서버는 구글 음성이 실패하면 audio에 'ERROR:403' 같은 글자를 준다 — base64로 해독하지 않는다(웹 칠판 index.html과 같은 거름, 1.3.5)
+      if (!res.ok || !res.data || !res.data.audio || String(res.data.audio).indexOf('ERROR:') === 0) { setTtsStatus('⚠️ 음성 준비 실패'); resolve(); return; }
       try {
         var b64 = res.data.audio;
         var binary = atob(b64), buf = new ArrayBuffer(binary.length), view = new Uint8Array(buf);
@@ -718,7 +722,11 @@ function renderAgenda(agenda) {
 }
 function renderMeal(meals) {
   var el = document.getElementById('mealList'); if (!el) return;
-  if (!meals || !meals.length) { el.innerHTML = '<div class="meal-empty">오늘은 급식이 없어요</div>'; return; }
+  // null = 한 번도 못 받음(서버 오류) · [] = 받았는데 급식 없는 날 — 둘을 다르게 말한다(시간표와 같은 문구, 1.3.5)
+  // 문구만 그릴 때는 두 끼 배치(multi)·줄임(compact) 등 앞 급식의 배치를 걷어 낸다 — 안 그러면 문구가 두 칸 격자 안에 그려졌다
+  if (meals == null || !meals.length) el.className = '';
+  if (meals == null) { el.innerHTML = '<div class="meal-empty">급식을 불러오지 못했어요 — 잠시 뒤 다시 받아요</div>'; return; }
+  if (!meals.length) { el.innerHTML = '<div class="meal-empty">오늘은 급식이 없어요</div>'; return; }
   el.innerHTML = '';
   el.className = (meals.length > 1) ? 'multi' : '';
   var typeIcon = { '조식': '🌅', '중식': '🍚', '석식': '🌙' };

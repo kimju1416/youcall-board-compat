@@ -800,6 +800,44 @@ if (FLAVOR === 'compat') {
     same(sets.pop().value, '7:1789000000000,8:1789000001000,9:1789000005000,10:1789000006000', '읽은 목록 + 먼저 온 호출 + 새 호출');
     ok(/loadWebAlerted\(\);\s*\n\s*startPolling\(\);/.test(SRC), '켤 때 목록을 읽고 나서 폴링을 시작하지 않는다');
   });
+
+  /* 2026-09-14 전수 점검(1.3.5) — 서버 오류일 때 화면이 사실과 다르게 말하던 두 곳 */
+  check('L-11 급식을 한 번도 못 받았으면 «없어요»가 아니라 «불러오지 못했어요» / 받은 뒤 실패하면 직전값', async () => {
+    const seen = [];
+    let fail = true;
+    const c = sandbox(['refreshMeal', 'isConfigured'], { vars: ['POLL_MS', 'pollTimer', 'lastMeal'], optional: ['normalizeClassNo'] });
+    c.SETTINGS = { webAppUrl: 'https://a.b/exec', grade: '3', classNum: '2' };
+    c.setTimeout = () => 1; c.clearTimeout = () => {};
+    const M = [{ type: '중식', dishes: ['밥', '국'], kcal: '700', allergy: [] }];
+    c.api = { getMeal: () => Promise.resolve(fail ? { ok: false, error: 'HTTP 500' } : { ok: true, data: M }), getTimetable: () => Promise.resolve({ ok: false, error: 'HTTP 500' }) };
+    c.onBoardData = d => seen.push(d);
+    await c.refreshMeal();
+    same(seen[0].meal, null, '처음 실패한 급식은 null(못 받음)이어야 한다');
+    fail = false; await c.refreshMeal();
+    same(seen[1].meal, M, '성공');
+    fail = true; await c.refreshMeal();
+    same(seen[2].meal, M, '받은 뒤 실패하면 직전값 유지');
+    c.api.getMeal = () => Promise.resolve({ ok: true, data: { ok: false, msg: '알 수 없는 api' } });
+    await c.refreshMeal();
+    same(seen[3].meal, M, '200인데 목록이 아닌 답은 받은 것으로 치지 않는다(직전 급식을 덮지 않음)');
+    const r = sandbox(['renderMeal']);
+    r.renderMeal(null);
+    ok(r.__doc.reg.mealList.innerHTML.indexOf('불러오지 못했') >= 0, '못 받음(null) 문구: ' + r.__doc.reg.mealList.innerHTML);
+    r.renderMeal([]);
+    ok(r.__doc.reg.mealList.innerHTML.indexOf('오늘은 급식이 없어요') >= 0, '받았는데 빈 날 문구: ' + r.__doc.reg.mealList.innerHTML);
+  });
+  check('L-12 음성: 서버가 audio에 «ERROR:…»(구글 음성 실패)를 주면 해독하지 않고 «음성 준비 실패»', async () => {
+    const st = [];
+    let atobCalled = false;
+    const c = sandbox(['speakAsync'], { vars: ['_ttsSource'], globals: { atob: () => { atobCalled = true; throw new Error('atob가 불렸다'); } } });
+    vm.runInContext('_ttsToken = 1;', c);
+    c.setTtsStatus = m => st.push(m);
+    c.SETTINGS = { webAppUrl: 'https://a.b/exec' };
+    c.api = { getTts: () => Promise.resolve({ ok: true, data: { audio: 'ERROR:403' } }) };
+    await c.speakAsync('가상학생', 1);
+    ok(!atobCalled, '실패 표시를 base64로 해독하려 했다');
+    same(st[st.length - 1], '⚠️ 음성 준비 실패', '마지막 상태 문구');
+  });
 }
 
 /* ---------- 실행 ---------- */
