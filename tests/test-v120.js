@@ -551,6 +551,15 @@ if (FLAVOR === 'compat') {
     const BOOT = fs.readFileSync(path.join(path.dirname(JAVA), 'BootReceiver.java'), 'utf8');
     ok(/try \{ YouCallService\.start\(context\); \}\s*catch \(Exception/.test(BOOT), 'BootReceiver가 서비스 시작 예외를 잡지 않는다(Android 15 부팅 때 꺼짐)');
     ok(/public void onTimeout\(int startId, int fgsType\)[\s\S]{0,300}stopSelf\(\)/.test(JSRC), 'onTimeout에서 stopSelf를 하지 않는다(Android 15 dataSync 6시간 뒤 꺼짐)');
+    // 검수(2026-09-14): Android 15 부팅 금지·12+ 뒤 재시작 거절은 BootReceiver가 아니라 서비스의 startForeground에서 던진다
+    const jl = JSRC.split('\n');
+    jl.forEach((l, i) => {
+      if (!/\bstartForeground\(/.test(l) || /startForegroundService/.test(l) || /^\s*(\/\/|\*)/.test(l)) return;
+      ok(/try \{\s*$/.test(jl[i - 1] || '') || /try \{ startForeground\(/.test(l), 'YouCallService.java ' + (i + 1) + '줄 startForeground가 try 밖이다: ' + l.trim());
+    });
+    ok(/포그라운드 서비스 시작 거절[\s\S]{0,120}stopSelf\(\);\s*return;/.test(JSRC), 'startForeground가 거절되면 멈추고 빠져나가야 한다');
+    ok(/public void onResume\(\)[\s\S]{0,600}try \{ YouCallService\.start\(this\); \} catch \(Exception ignored\)/.test(MAIN_SRC), '앱을 앞으로 가져와도 멈춘 서비스를 다시 세우지 않는다(singleTask라 onCreate가 안 불림)');
+    ok(/try \{ nm\.notify\(NOTI_CALL, b\.build\(\)\); \}/.test(JSRC), '호출 알림 notify가 try 밖이다 — 예외 나면 «이미 알림» 기록만 남고 화면·알람을 건너뛴다');
   });
 }
 

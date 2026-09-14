@@ -19,6 +19,9 @@ public class MainActivity extends BridgeActivity {
         super.onResume();
         inForeground = true;
         applyNeverSleep();   // 권한을 방금 켜고 돌아온 경우 여기서 바로 적용된다
+        // 서비스가 멈춰 있으면 다시 세운다 — Android 15 dataSync 6시간 한도(onTimeout)나 뒤에서 시작이 거절된 뒤에도
+        // 앱을 앞으로 가져오면 감시가 돌아오게. singleTask라 돌아올 때는 onCreate가 안 불린다. 이미 돌고 있으면 해가 없다.
+        try { YouCallService.start(this); } catch (Exception ignored) { }
     }
     @Override public void onPause() { inForeground = false; super.onPause(); }
 

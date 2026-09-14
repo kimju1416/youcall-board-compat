@@ -88,7 +88,16 @@ public class YouCallService extends Service {
     public void onCreate() {
         super.onCreate();
         createChannels();
-        startForeground(NOTI_ONGOING, buildOngoingNotification("호출 대기 중"));
+        // Android 12+는 뒤에서(부팅 직후·시스템이 서비스를 다시 세울 때) 포그라운드 서비스 전환을 막으면 이 줄에서 예외를 던진다.
+        // Android 15의 «부팅 직후 dataSync 금지»도 BootReceiver가 아니라 여기서 난다. 잡지 않으면 onCreate에서 앱이 꺼진다.
+        // 못 서면 조용히 멈춘다 — 앱을 열거나 앞으로 가져오면(MainActivity) 다시 올라온다.
+        try {
+            startForeground(NOTI_ONGOING, buildOngoingNotification("호출 대기 중"));
+        } catch (Exception e) {
+            Log.w(TAG, "포그라운드 서비스 시작 거절 — 앱을 열면 다시 시도: " + e);
+            stopSelf();
+            return;
+        }
         // HDMI 입력 중에는 안드로이드 화면이 꺼진 것과 같아 시스템이 절전에 들어간다.
         // 그러면 이 서비스의 폴링 타이머가 늦춰지고 네트워크도 막혀 호출을 놓친다
         // (증상: 소리도 팝업도 없다가, 화면을 깨우면 밀린 호출이 한꺼번에 뜬다).
@@ -410,7 +419,8 @@ public class YouCallService extends Service {
         // 알림 채널 소리와 웹 호출음이 겹치는 것을 막는다.
         if (!MainActivity.inForeground) {
             NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
-            nm.notify(NOTI_CALL, b.build());
+            // 여기서 예외가 나면 이 호출은 이미 «알림»으로 기록된 뒤라(saveAlerted) 화면 띄우기·대체 알람까지 통째로 건너뛴다 — 감싼다
+            try { nm.notify(NOTI_CALL, b.build()); } catch (Exception e) { Log.w(TAG, "호출 알림 실패: " + e); }
         }
 
         // "다른 앱 위에 표시" 권한이 있으면 백그라운드에서도 액티비티를 직접 띄울 수 있다(가장 확실)
