@@ -144,6 +144,18 @@ public class MainActivity extends BridgeActivity {
     }
 
     /**
+     * 설정 화면을 차례로 열어 본다. 하나라도 열리면 true.
+     * 제조사가 설정 화면을 뺀 칠판에서는 startActivity가 ActivityNotFoundException을 던진다 —
+     * 1.3.2까지는 두 번째 시도가 try 밖이라 [설정 열기]를 누르는 순간 앱이 꺼졌다(2026-09-14 «메뉴가 없다» 제보로 코드에서 찾음).
+     */
+    private boolean openFirstAvailable(Intent... intents) {
+        for (Intent i : intents) {
+            try { startActivity(i); return true; } catch (Exception ignored) { }
+        }
+        return false;
+    }
+
+    /**
      * 다른 앱(수업자료·인터넷 등)을 쓰는 중에 호출이 오면 이 화면이 스스로 앞으로 나와야 하는데,
      * 안드로이드는 그걸 '다른 앱 위에 표시' 권한이 있을 때만 허용한다.
      * 사용자가 직접 켜야 하는 권한이라 앱에서 설정 화면까지 안내한다.
@@ -161,13 +173,22 @@ public class MainActivity extends BridgeActivity {
                     + "(켜지 않으면 다른 화면을 보는 동안에는 호출 화면이 뜨지 않고 소리로만 알려 드립니다)"
             )
             .setPositiveButton("설정 열기", (d, w) -> {
-                try {
-                    startActivity(new Intent(
-                        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                        Uri.parse("package:" + getPackageName())
-                    ));
-                } catch (Exception ignored) {
-                    startActivity(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION));
+                boolean opened = openFirstAvailable(
+                    new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:" + getPackageName())),
+                    new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION)
+                );
+                if (!opened) {
+                    // 이 칠판에는 그 설정 화면이 없다 — 앱을 끄지 말고 어디서 찾을지·없어도 되는지만 알린다
+                    new AlertDialog.Builder(this)
+                        .setTitle("이 칠판에서는 설정 화면을 열 수 없습니다")
+                        .setMessage(
+                            "칠판 설정에서 '다른 앱 위에 표시'를 직접 찾아 「유콜 보드 (호환)」을 허용해 주세요.\n"
+                                + "(설정 ▸ 앱 ▸ 특별한 앱 접근 ▸ 다른 앱 위에 표시 — 설정 검색창에 '다른 앱 위'를 쳐도 됩니다)\n\n"
+                                + "그 메뉴가 없는 칠판이면 켜지 않아도 됩니다. 유콜 화면을 띄워 둔 동안은 호출이 그대로 뜨고,\n"
+                                + "다른 화면을 보는 동안에는 소리로 알려 드립니다."
+                        )
+                        .setPositiveButton("확인", null)
+                        .show();
                 }
             })
             .setNegativeButton("나중에", null)

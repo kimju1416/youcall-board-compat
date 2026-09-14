@@ -535,6 +535,23 @@ if (FLAVOR === 'compat') {
     ok(/playAlertNTimes\([^\n]*call\.row\)/.test(fn('showAlert')), '호출 화면이 행 번호를 소리 재생에 넘기지 않는다');
     ok(/if \(i === 0\) markSoundedForNative\(row\)/.test(fn('playAlertNTimes')), '첫 호출음 뒤에 표시를 적지 않는다');
   });
+
+  /* 2026-09-14 «설정 메뉴가 없다» 제보 — 제조사가 설정 화면을 뺀 칠판에서 startActivity가 ActivityNotFoundException을 던지면
+     잡지 않은 자리에서 앱이 꺼진다. Android 15(targetSdk 35+) 포그라운드 서비스 제약 두 가지도 같은 «꺼짐» 갈래다. */
+  check('C-7 칠판에 없는 화면·Android 15 제약으로 앱이 꺼지지 않는다', () => {
+    const lines = MAIN_SRC.split('\n');
+    lines.forEach((l, i) => {
+      if (l.indexOf('startActivity(') < 0 || /private boolean openFirstAvailable/.test(l)) return;
+      const back = lines.slice(Math.max(0, i - 3), i + 1).join('\n');
+      ok(/try \{[^\n]*$|try \{ startActivity\(|try \{\s*\n/.test(back) && !/\} catch \(Exception ignored\) \{\s*\n\s*startActivity\(/.test(back),
+        'MainActivity.java ' + (i + 1) + '줄 startActivity가 try 밖이다: ' + l.trim());
+    });
+    ok(/private boolean openFirstAvailable\(Intent\.\.\. intents\)/.test(MAIN_SRC) && /try \{ startActivity\(i\); return true; \} catch \(Exception ignored\)/.test(MAIN_SRC), '설정 화면을 차례로 열어 보는 도우미가 없다');
+    ok(/if \(!opened\)/.test(MAIN_SRC) && MAIN_SRC.indexOf('이 칠판에서는 설정 화면을 열 수 없습니다') >= 0, '설정 화면이 없을 때 안내가 없다');
+    const BOOT = fs.readFileSync(path.join(path.dirname(JAVA), 'BootReceiver.java'), 'utf8');
+    ok(/try \{ YouCallService\.start\(context\); \}\s*catch \(Exception/.test(BOOT), 'BootReceiver가 서비스 시작 예외를 잡지 않는다(Android 15 부팅 때 꺼짐)');
+    ok(/public void onTimeout\(int startId, int fgsType\)[\s\S]{0,300}stopSelf\(\)/.test(JSRC), 'onTimeout에서 stopSelf를 하지 않는다(Android 15 dataSync 6시간 뒤 꺼짐)');
+  });
 }
 
 /* ---------- 실행 ---------- */

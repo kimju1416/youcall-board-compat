@@ -138,6 +138,17 @@ public class YouCallService extends Service {
         return START_STICKY; // 시스템이 죽여도 다시 살아나 상주를 유지한다
     }
 
+    /**
+     * Android 15(targetSdk 35+)는 dataSync 포그라운드 서비스를 하루 6시간까지만 허락하고, 다 차면 이걸 부른다.
+     * 몇 초 안에 stopSelf()를 안 하면 «did not stop within its timeout»으로 앱이 강제 종료된다(공식 문서).
+     * 멈춰도 앱 화면(웹)은 계속 호출을 확인하고 소리를 낸다. 사용자가 앱을 앞으로 가져오면 6시간이 다시 채워진다.
+     */
+    @Override
+    public void onTimeout(int startId, int fgsType) {
+        Log.w(TAG, "dataSync 6시간 한도 — 서비스를 멈춘다(강제 종료 방지)");
+        try { stopSelf(); } catch (Exception ignored) { }
+    }
+
     @Override
     public void onDestroy() {
         running = false;
